@@ -1,11 +1,9 @@
 import { Address, SendMode, fromNano, toNano } from '@ton/core'
 import { NetworkProvider } from '@ton/blueprint'
 
+import { HGRAM, HPO } from '../wrappers/addresses'
 import { beginOwnerAction, confirm, jettonBalance, walletAddressOf } from '../wrappers/operate'
 import { jettonTransfer } from '../wrappers/rescue'
-
-const HGRAM = Address.parse('EQDPdq8xjAhytYqfGSX8KcFWIReCufsB9Wdg0pLlYSO_h76w')
-const HPO = Address.parse('EQDQEUr0LPi8m6D6F0Wrvuok7tZbAcr0yn2Y7hK291MMzMjM')
 
 /**
  * Move any jetton out of the burner: hGRAM, HPO, or something that did not exist when this was

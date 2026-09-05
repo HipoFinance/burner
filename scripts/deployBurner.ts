@@ -1,6 +1,14 @@
 import { Address, toNano } from '@ton/core'
 import { compile, NetworkProvider } from '@ton/blueprint'
 
+import {
+    DEDUST_HGRAM_VAULT,
+    DEDUST_POOL,
+    HGRAM,
+    HIPO_PARENT,
+    HIPO_TREASURY,
+    HPO,
+} from '../wrappers/addresses'
 import { Burner, emptyBurnerConfig } from '../wrappers/Burner'
 
 /**
@@ -8,13 +16,6 @@ import { Burner, emptyBurnerConfig } from '../wrappers/Burner'
  * burner has no owner and no upgrade path, so a wrong constant here is not a misconfiguration
  * that can be corrected later -- it is a redeploy plus a treasury upgrade to name the new address.
  */
-const POOL = Address.parse('EQCXJu7zUBQILdzt1nIzz_NhDfVZ-FyEdnccFDYDPRaAqfqU')
-const HIPO_TREASURY = Address.parse('EQCLyZHP4Xe8fpchQz76O-_RmUhaVc_9BAoGyJrwJrcbz2eZ')
-const HIPO_PARENT = Address.parse('EQDPdq8xjAhytYqfGSX8KcFWIReCufsB9Wdg0pLlYSO_h76w')
-const DEDUST_HGRAM_VAULT = Address.parse('EQCRjILmJD0ZD7y6POFyicCx20PoypkEwHJ64AMJ7vwkXGjm')
-const HGRAM = Address.parse('EQDPdq8xjAhytYqfGSX8KcFWIReCufsB9Wdg0pLlYSO_h76w')
-const HPO = Address.parse('EQDQEUr0LPi8m6D6F0Wrvuok7tZbAcr0yn2Y7hK291MMzMjM')
-
 export async function run(provider: NetworkProvider) {
     const ui = provider.ui()
 
@@ -50,7 +51,7 @@ export async function run(provider: NetworkProvider) {
     }
 
     // 2. The pool must still be the hGRAM/HPO pair, and still have liquidity.
-    const { stack: assets } = await provider.provider(POOL).get('get_assets', [])
+    const { stack: assets } = await provider.provider(DEDUST_POOL).get('get_assets', [])
     const asset0 = assets.readCell().beginParse()
     const asset1 = assets.readCell().beginParse()
     const readAsset = (s: ReturnType<typeof asset0.clone>) => {
@@ -66,7 +67,7 @@ export async function run(provider: NetworkProvider) {
         problems.push('pool assets are not [hGRAM, HPO]')
     }
 
-    const { stack: reserves } = await provider.provider(POOL).get('get_reserves', [])
+    const { stack: reserves } = await provider.provider(DEDUST_POOL).get('get_reserves', [])
     const reserveHgram = reserves.readBigNumber()
     const reserveHpo = reserves.readBigNumber()
     ui.write(`  pool reserves     ${String(reserveHgram)} hGRAM / ${String(reserveHpo)} HPO`)

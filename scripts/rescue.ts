@@ -1,10 +1,9 @@
-import { Address, SendMode, fromNano, toNano } from '@ton/core'
+import { SendMode, fromNano, toNano } from '@ton/core'
 import { NetworkProvider } from '@ton/blueprint'
 
+import { DEDUST_POOL } from '../wrappers/addresses'
 import { beginOwnerAction, confirm, gram, jettonBalance } from '../wrappers/operate'
 import { gramTransfer, jettonTransfer } from '../wrappers/rescue'
-
-const POOL = Address.parse('EQCXJu7zUBQILdzt1nIzz_NhDfVZ-FyEdnccFDYDPRaAqfqU')
 
 /**
  * The one script to reach for when the route has died.
@@ -30,7 +29,7 @@ export async function run(provider: NetworkProvider) {
     ui.write('Checking the pool...')
     let poolDead: boolean
     try {
-        const { stack } = await provider.provider(POOL).get('get_reserves', [])
+        const { stack } = await provider.provider(DEDUST_POOL).get('get_reserves', [])
         const reserveHgram = stack.readBigNumber()
         const reserveHpo = stack.readBigNumber()
         ui.write(`  reserves  ${fromNano(reserveHgram)} hGRAM / ${fromNano(reserveHpo)} HPO`)

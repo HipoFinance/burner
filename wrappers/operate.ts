@@ -1,8 +1,9 @@
 import { Address, fromNano } from '@ton/core'
-import { compile, NetworkProvider } from '@ton/blueprint'
+import { NetworkProvider } from '@ton/blueprint'
 import type { OpenedContract } from '@ton/core'
 
-import { Burner, emptyBurnerConfig } from './Burner'
+import { BURNER } from './addresses'
+import { Burner } from './Burner'
 
 /**
  * Shared preamble for the owner scripts.
@@ -27,17 +28,16 @@ export interface Session {
 }
 
 /**
- * The burner address is derived from its initial state, which includes the owner. Once ownership
- * has moved on chain that derivation no longer reproduces the address, so the deployed address is
- * asked for rather than recomputed, with the freshly-deployed guess offered as the default.
+ * Open the burner, defaulting to the deployed one and allowing any other address to be given.
+ *
+ * The address is never derived here. A derivation is built from the contract's initial state,
+ * which includes the original owner, so it stops reproducing the right address as soon as
+ * ownership moves -- and it would do so silently, offering a plausible-looking default for a
+ * contract that does not exist.
  */
 export async function openBurner(provider: NetworkProvider): Promise<OpenedContract<Burner>> {
     const ui = provider.ui()
-    const code = await compile('Burner')
-    const sender = provider.sender().address
-    const guess = Burner.createFromConfig(emptyBurnerConfig(sender ?? null), code).address
-
-    const address = await ui.inputAddress('Burner address', guess)
+    const address = await ui.inputAddress('Burner address', BURNER)
     if (!(await provider.isContractDeployed(address))) {
         throw new Error(`No contract deployed at ${address.toString()}`)
     }

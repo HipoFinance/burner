@@ -7,9 +7,14 @@ Every script prints the contract's current state and refuses locally if the conn
 cannot perform the action, rather than sending a message that bounces. Nothing sends without a
 confirmation.
 
-All of them ask for the burner address, defaulting to the address a freshly deployed contract
-would have. **Once ownership has changed, that default is wrong** — the address is derived from
-the initial state, which includes the original owner — so keep the deployed address written down.
+All of them ask for the burner address and default to the deployed one, so pressing enter is
+normally right. Give a different address to work on another deployment.
+
+The default is a constant in `wrappers/addresses.ts`, not a derivation. A derived address is
+built from the contract's *initial* state, which includes the original owner, so it would stop
+reproducing the right address the moment ownership moved — silently, by offering a plausible
+default for a contract that does not exist. **If you deploy a replacement burner, update that
+constant.**
 
 | Script | What it does |
 | --- | --- |

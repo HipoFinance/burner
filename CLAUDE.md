@@ -73,6 +73,10 @@ reach into. One leg advances per trigger, so repeated pokes are the recovery too
   emergency. If you add a withdrawal shape, add it here and cover it.
 - `wrappers/operate.ts` — shared script preamble. Owner scripts print state and refuse locally
   before sending, so a mistake is a printed line and not a bounce to decode.
+- `wrappers/addresses.ts` — the deployed burner and the mainnet addresses the scripts use, in one
+  place so they cannot drift. The burner address is a constant, deliberately not derived: a
+  derivation keys off initial state including the original owner, so it would go quietly wrong
+  once ownership moves. **Update it if you deploy a replacement.**
 
 ## Testing notes
 
