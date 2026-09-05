@@ -1,0 +1,166 @@
+;; Addresses, op codes and gas budgets for the HPO burner.
+;;
+;; Every address below was read from mainnet on 2026-09-04 and is a compile-time constant: the
+;; burner has no owner and no upgrade path, so nothing here can be changed after deployment.
+;; See docs/specs/2026-09-04-hpo-burner.md for the derivations.
+
+
+;; ---------------------------------------------------------------------------------------------
+;; Hipo
+;; ---------------------------------------------------------------------------------------------
+
+;; The treasury, EQCLyZHP4Xe8fpchQz76O-_RmUhaVc_9BAoGyJrwJrcbz2eZ. It is both the payer -- it
+;; forwards the borrower fee here on every loan recovery -- and the counterparty for the deposit
+;; leg, which turns that GRAM into hGRAM.
+const int hipo::treasury::wc = 0;
+const int hipo::treasury::addr = 0x8bc991cfe177bc7e9721433efa3befd199485a55cffd040a06c89af026b71bcf;
+
+;; The parent, EQDPdq8xjAhytYqfGSX8KcFWIReCufsB9Wdg0pLlYSO_h76w -- the hGRAM jetton master. Read
+;; back from the treasury's own get_treasury_state (index 5), not from a constants file, so the
+;; two cannot disagree. Answers TEP-89, which is how the burner learns its hGRAM wallet.
+const int hipo::parent::wc = 0;
+const int hipo::parent::addr = 0xcf76af318c0872b58a9f1925fc29c156211782b9fb01f56760d292e56123bf87;
+
+
+;; ---------------------------------------------------------------------------------------------
+;; HPO
+;; ---------------------------------------------------------------------------------------------
+
+;; HPO jetton master, EQDQEUr0LPi8m6D6F0Wrvuok7tZbAcr0yn2Y7hK291MMzMjM. A Notcoin-style jetton, so
+;; op::burn from the wallet owner permanently reduces total_supply -- a real burn, not a transfer
+;; to an unspendable address.
+const int hpo::wc = 0;
+const int hpo::addr = 0xd0114af42cf8bc9ba0fa1745abbeea24eed65b01caf4ca7d98ee12b6f7530ccc;
+
+
+;; ---------------------------------------------------------------------------------------------
+;; DeDust route: hGRAM -> HPO
+;; ---------------------------------------------------------------------------------------------
+
+;; Pool EQCXJu7zUBQILdzt1nIzz_NhDfVZ-FyEdnccFDYDPRaAqfqU, volatile, 0.25% fee. Its get_assets
+;; returns [hGRAM, HPO] in that order.
+;;
+;; Which pool the burn trades in is a protocol decision about where HPO liquidity should sit,
+;; not a property of this mechanism, and it is fixed here rather than made settable: there is no
+;; setter, and changing it means deploying a new burner. The same decision is why the contract
+;; carries no swap cap and no slippage limit.
+const int dedust::pool::wc = 0;
+const int dedust::pool::addr = 0x9726eef35014082ddcedd67233cff3610df559f85c8476771c1436033d1680a9;
+
+;; The hGRAM vault, EQCRjILmJD0ZD7y6POFyicCx20PoypkEwHJ64AMJ7vwkXGjm: where the swap is entered.
+;; Derived from the DeDust factory's get_vault_address for the hGRAM jetton asset, and confirmed
+;; by its own get_asset. hGRAM is sent to it with the swap as the transfer's forward payload --
+;; DeDust needs no pTON and no router hop, so this is one message from our wallet.
+const int dedust::hgram_vault::wc = 0;
+const int dedust::hgram_vault::addr = 0x918c82e6243d190fbcba3ce17289c0b1db43e8ca9904c0727ae00309eefc245c;
+
+;; The HPO vault, EQBQ50kTIWywaTa01p_JnHhkaiEukwdt1WPvdHIvP1V5SPMy: what pays the bought HPO out
+;; to us. Only used to recognise its messages, never sent to.
+const int dedust::hpo_vault::wc = 0;
+const int dedust::hpo_vault::addr = 0x50e74913216cb06936b4d69fc99c78646a212e93076dd563ef74722f3f557948;
+
+
+;; ---------------------------------------------------------------------------------------------
+;; Op codes
+;; ---------------------------------------------------------------------------------------------
+
+;; Sent by the treasury on every loan recovery, carrying the borrower fee. The burner does not
+;; require it -- any incoming GRAM triggers the cycle -- but it is recognised so logs can
+;; attribute it.
+const int op::take_borrower_fee = 0x5e2d81f4;
+
+;; Hipo. deposit_coins turns GRAM into hGRAM; send_tokens is Hipo's wallet transfer and shares
+;; TEP-74's op code, which is what lets DeDust treat hGRAM as an ordinary jetton.
+const int op::deposit_coins = 0x3d3761a6;
+const int op::send_tokens = 0x0f8a7ea5;
+const int op::gas_excess = 0xd53276db;
+
+;; TEP-89 wallet discovery, run against the Hipo parent and the HPO master.
+const int op::provide_wallet_address = 0x2c76b973;
+const int op::take_wallet_address = 0xd1735400;
+
+;; TEP-74. Arrives from our hGRAM wallet when a deposit mints, and from our HPO wallet when a
+;; swap fills. The two are told apart by sender.
+const int op::transfer_notification = 0x7362d09c;
+
+;; HPO jetton wallet burn, from hpo-contract/contracts/op-codes.fc.
+const int op::burn = 0x595f07bc;
+
+;; DeDust swap, carried as the forward payload of the hGRAM transfer into the vault.
+const int op::dedust_swap = 0xe3a0d482;
+
+;; Owner ops. The burn path itself takes no parameters and cannot be redirected -- these exist so
+;; that assets which fall out of the cycle can be recovered, not so that the mechanism can be
+;; changed. See the rescue hatch section of the spec.
+const int op::withdraw = 0x7a9b3e51;
+const int op::reset_pending = 0x1c4f8a23;
+const int op::transfer_ownership = 0x2f0b7d64;
+const int op::claim_ownership = 0x6d1e4c09;
+const int op::drop_ownership = 0x4b8a2f17;
+
+
+;; ---------------------------------------------------------------------------------------------
+;; Errors
+;; ---------------------------------------------------------------------------------------------
+
+const int err::access_denied = 200;
+const int err::no_owner = 201;
+
+
+;; ---------------------------------------------------------------------------------------------
+;; Sizing
+;; ---------------------------------------------------------------------------------------------
+
+;; Held back from every deposit. Unlike a single-leg burner this must fund a whole cycle that is
+;; already in flight -- the swap leg and then the burn leg both draw on it after the GRAM has
+;; already left -- so it is sized at swap_gas + burn_gas plus margin and storage, not at storage
+;; alone. Returned excesses from all three legs top it back up.
+const int budget::reserve = 1000000000; ;; 1 GRAM
+
+;; Attached to send_tokens for the swap leg. Hipo's wallet requires
+;; send_tokens_fee() + forward_ton_amount + 2 * fwd_fee; send_tokens_fee() is about 0.01 GRAM,
+;; and budget::swap_forward is what rides on into DeDust to pay for the vault, the pool and the
+;; payout. DeDust returns what it does not spend.
+const int budget::swap_gas = 400000000;     ;; 0.4 GRAM
+const int budget::swap_forward = 300000000; ;; 0.3 GRAM
+
+;; Paid to our HPO wallet with op::burn. It forwards a burn_notification to the master and
+;; refunds the remainder to us.
+const int budget::burn_gas = 100000000; ;; 0.1 GRAM
+
+;; Paid to the parent and to the HPO master for TEP-89 discovery. Both reply with
+;; send::remaining_value, so most of this comes straight back.
+const int budget::discovery_gas = 50000000; ;; 0.05 GRAM
+
+;; Smallest deposit worth making. There is deliberately no maximum: the whole balance above the
+;; reserve is deposited and burned every time. This floor is a dust guard, not a slippage
+;; control -- it exists so that returned change and stray small amounts cannot spend more in gas
+;; than they are worth. The treasury's own deposit fee is about 0.0088 GRAM, so 1 GRAM is a wide
+;; margin over the point where a deposit stops paying for itself.
+const int budget::min_deposit = 1000000000; ;; 1 GRAM
+
+
+;; ---------------------------------------------------------------------------------------------
+;; Log topics
+;; ---------------------------------------------------------------------------------------------
+
+const int log::received = 0x1;
+const int log::deposit = 0x2;
+const int log::swap = 0x3;
+const int log::burn = 0x4;
+const int log::discovery = 0x5;
+
+
+;; ---------------------------------------------------------------------------------------------
+;; Send and reserve modes, matching contract/contracts/imports/constants.fc
+;; ---------------------------------------------------------------------------------------------
+
+const int reserve::regular = 0;
+const int reserve::at_most = 2;
+const int reserve::add_original_balance = 4;
+
+const int send::regular = 0;
+const int send::pay_gas_separately = 1;
+const int send::ignore_errors = 2;
+const int send::bounce_on_action_fail = 16;
+const int send::unreserved_balance = 128;

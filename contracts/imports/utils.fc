@@ -1,0 +1,58 @@
+;; Shared helpers. Kept deliberately close to contract/contracts/imports/utils.fc so the two
+;; codebases read the same way.
+
+builder to_builder(slice s) inline {
+    return begin_cell().store_slice(s);
+}
+
+builder store_log(builder b, builder log) inline {
+    ;; A log body always goes in a ref: emit_log's own header uses most of the root cell, and the
+    ;; body is never read on-chain, so there is nothing to gain from inlining it.
+    return b.store_uint(1, 1).store_ref(log.end_cell());
+}
+
+() send_msg(int bounceable?, builder dst, builder body, int coins, int mode) impure inline_ref {
+    ;; int_msg_info$0 ihr_disabled:Bool bounce:Bool bounced:Bool
+    ;;   src:MsgAddress dest:MsgAddressInt
+    ;;   value:CurrencyCollection ihr_fee:Grams fwd_fee:Grams
+    ;;   created_lt:uint64 created_at:uint32 = CommonMsgInfoRelaxed;
+    ;; message$_ {X:Type} info:CommonMsgInfoRelaxed
+    ;;   init:(Maybe (Either StateInit ^StateInit))
+    ;;   body:(Either X ^X) = MessageRelaxed X;
+    cell msg = begin_cell()
+        .store_uint(bounceable? ? 0x18 : 0x10, 6) ;; 011000 or 010000
+        .store_builder(dst)
+        .store_coins(coins)
+        .store_uint(0, 1 + 4 + 4 + 64 + 32)
+        .store_uint(0, 1) ;; no state init
+        .store_uint(1, 1) ;; body in a ref
+        .store_ref(body.end_cell())
+        .end_cell();
+    send_raw_message(msg, mode);
+}
+
+() emit_log(int topic, builder log) impure inline_ref {
+    ;; addr_extern$01 len:(## 9) external_address:(bits len) = MsgAddressExt;
+    ;; ext_out_msg_info$11 src:MsgAddress dest:MsgAddressExt
+    ;;   created_lt:uint64 created_at:uint32 = CommonMsgInfoRelaxed;
+    ;; message$_ {X:Type} info:CommonMsgInfoRelaxed
+    ;;   init:(Maybe (Either StateInit ^StateInit))
+    ;;   body:(Either X ^X) = MessageRelaxed X;
+    cell msg = begin_cell()
+        .store_uint(0x31, 2 + 2 + 2) ;; 110001
+        .store_uint(256, 9)
+        .store_uint(topic, 256)
+        .store_uint(0, 64 + 32 + 1)
+        .store_log(log)
+        .end_cell();
+    send_raw_message(msg, send::regular);
+}
+
+builder create_address(int wc, int addr) inline {
+    ;; addr_std$10 anycast:(Maybe Anycast) workchain_id:int8 address:bits256 = MsgAddressInt;
+    return begin_cell().store_uint(4, 3).store_int(wc, 8).store_uint(addr, 256);
+}
+
+int equal_addresses?(slice a, builder b) inline {
+    return equal_slice_bits(a, b.end_cell().begin_parse());
+}

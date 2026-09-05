@@ -1,0 +1,80 @@
+;; A stand-in for the Hipo treasury's deposit path, for tests only.
+;;
+;; The burner touches the treasury through exactly one message -- op::deposit_coins -- and cares
+;; only that hGRAM comes back. Standing in for it here avoids instantiating a treasury with live
+;; participations, while the parent and wallet underneath are the real compiled contracts, so the
+;; mint, the notification and send_tokens all behave exactly as they do in production.
+;;
+;; Deployed at the real treasury address via setShardAccount, which is also what makes a typo in
+;; constants.fc fail the suite.
+
+#include "../imports/stdlib.fc";
+#include "../imports/constants.fc";
+#include "../imports/utils.fc";
+
+const int op::proxy_tokens_minted = 0x5be57626;
+
+global slice parent;
+global int rate;        ;; hGRAM minted per GRAM, scaled by 1e9
+global int fee;         ;; what the treasury keeps for gas, mirroring deposit_coins_fee
+global int reject;      ;; when true, throw -- the halted treasury case
+
+() load_data() impure inline {
+    slice ds = get_data().begin_parse();
+    parent = ds~load_msg_addr();
+    rate = ds~load_uint(64);
+    fee = ds~load_coins();
+    reject = ds~load_uint(1);
+    ds.end_parse();
+}
+
+() recv_internal(int my_balance, int msg_value, cell in_msg_full, slice s) impure {
+    slice cs = in_msg_full.begin_parse();
+    int flags = cs~load_uint(4);
+    if flags & 1 {
+        return ();
+    }
+    slice src = cs~load_msg_addr();
+    if s.slice_bits() < 32 {
+        return ();
+    }
+    load_data();
+    int op = s~load_uint(32);
+    if op != op::deposit_coins {
+        return ();
+    }
+
+    int query_id = s~load_uint(64);
+    slice owner = s~load_msg_addr();
+    int coins = s~load_coins();
+    s~load_coins();  ;; ownership_assigned_amount
+    s~load_msg_addr(); ;; referrer
+
+    throw_if(101, reject);
+
+    if owner.addr_none?() {
+        owner = src;
+    }
+
+    ;; coins = 0 means "stake the maximum this message can pay for", which is what the burner
+    ;; sends so that it never has to know the fee.
+    int max_coins = msg_value - fee;
+    ifnot coins {
+        coins = max_coins;
+    }
+    throw_unless(102, (max_coins >= coins) & (max_coins > 0));
+
+    int tokens = muldiv(coins, rate, 1000000000);
+    throw_unless(110, tokens > 0);
+
+    raw_reserve(coins, reserve::add_original_balance);
+
+    builder minted = begin_cell()
+        .store_uint(op::proxy_tokens_minted, 32)
+        .store_uint(query_id, 64)
+        .store_coins(tokens)
+        .store_coins(coins)
+        .store_slice(owner)
+        .store_uint(0, 32);  ;; round_since 0 == instant mint
+    send_msg(false, parent.to_builder(), minted, 0, send::unreserved_balance);
+}

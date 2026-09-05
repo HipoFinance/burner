@@ -1,0 +1,96 @@
+// Messages the burner sends and receives. Types it does not define are TEP-74/TEP-89, Hipo's
+// own, or DeDust's; they are written out here so an integrator can read one file.
+
+// ---- received ----
+
+// From the Hipo treasury on every loan recovery, carrying the borrower fee. Non-bounceable.
+// The burner does not require this op: any incoming GRAM is treated the same way.
+take_borrower_fee#5e2d81f4 query_id:uint64 = InternalMsgBody;
+
+// From the Hipo parent or the HPO master, answering discovery. Each is only believed from the
+// master it was asked of.
+take_wallet_address#d1735400 query_id:uint64 wallet_address:MsgAddress
+    owner_address:(Maybe ^MsgAddress) = InternalMsgBody;
+
+// From our hGRAM wallet when a deposit mints or DeDust hands hGRAM back, and from our HPO wallet
+// when a swap fills. Which leg it is depends only on the sender.
+transfer_notification#7362d09c query_id:uint64 amount:(VarUInteger 16)
+    sender:MsgAddress forward_payload:(Either Cell ^Cell) = InternalMsgBody;
+
+// Returned change, from several places including wallets whose addresses are not compile-time
+// constants. Recognised by op rather than by sender, and never treated as income.
+gas_excess#d53276db query_id:uint64 = InternalMsgBody;
+
+// ---- sent ----
+
+// To the Hipo parent and to the HPO master, on the first message that finds a wallet unknown.
+provide_wallet_address#2c76b973 query_id:uint64 owner_address:MsgAddress
+    include_address:Bool = InternalMsgBody;
+
+// Leg 1, to the Hipo treasury. coins = 0 means "stake the maximum this message pays for", so the
+// burner never needs to know the treasury's current fee.
+deposit_coins#3d3761a6 query_id:uint64 owner:MsgAddress coins:(VarUInteger 16)
+    ownership_assigned_amount:(VarUInteger 16) referrer:MsgAddress = InternalMsgBody;
+
+// Leg 2, to our own hGRAM wallet. Hipo's send_tokens shares TEP-74's op code, which is what lets
+// DeDust treat hGRAM as an ordinary jetton. recipient is the DeDust hGRAM vault and the swap
+// rides in the forward payload.
+send_tokens#0f8a7ea5 query_id:uint64 amount:(VarUInteger 16) recipient:MsgAddress
+    return_excess:MsgAddress custom_payload:(Maybe ^Cell)
+    forward_ton_amount:(VarUInteger 16) forward_payload:(Either Cell ^Cell) = InternalMsgBody;
+
+dedust_swap#e3a0d482 pool:MsgAddress kind:(## 1) limit:(VarUInteger 16)
+    next:(Maybe ^DedustSwapStep) swap_params:^DedustSwapParams = DedustSwap;
+
+dedust_swap_params$_ deadline:uint32 recipient:MsgAddress referral:MsgAddress
+    fulfill_payload:(Maybe ^Cell) reject_payload:(Maybe ^Cell) = DedustSwapParams;
+
+// Leg 3, to our own HPO wallet. The only op this contract ever sends towards HPO: there is no
+// code path that transfers it anywhere.
+burn#595f07bc query_id:uint64 amount:(VarUInteger 16)
+    response_destination:MsgAddress custom_payload:(Maybe ^Cell) = InternalMsgBody;
+
+// ---- owner ops, the rescue hatch ----
+
+// Send an arbitrary message on the contract's behalf. Deliberately general: GRAM, hGRAM, HPO and
+// any jetton not yet invented all come out through this one op. It cannot redirect the burn --
+// the route is in the code -- and it cannot change the code.
+withdraw#7a9b3e51 query_id:uint64 mode:uint8 message:^Cell = InternalMsgBody;
+
+// Square the pending amounts with reality after a withdrawal, so later triggers stop retrying a
+// leg for tokens that are no longer here.
+reset_pending#1c4f8a23 query_id:uint64 hgram_pending:(VarUInteger 16)
+    hpo_pending:(VarUInteger 16) = InternalMsgBody;
+
+// Two-step transfer: the owner nominates, the nominee claims. A mistyped address therefore
+// cannot destroy the hatch.
+transfer_ownership#2f0b7d64 query_id:uint64 new_owner:MsgAddress = InternalMsgBody;
+claim_ownership#6d1e4c09 query_id:uint64 = InternalMsgBody;
+
+// One way. After this nobody can reach into the contract and the burn is purely mechanical.
+drop_ownership#4b8a2f17 query_id:uint64 = InternalMsgBody;
+
+// ---- storage ----
+
+storage$_ hgram_wallet:MsgAddress hpo_wallet:MsgAddress
+    ownership:^Ownership counters:^Counters = Storage;
+
+// addr_none owner means ownership has been dropped.
+ownership$_ owner:MsgAddress pending_owner:MsgAddress = Ownership;
+
+counters$_ total_received:(VarUInteger 16) total_deposited:(VarUInteger 16)
+    total_swapped:(VarUInteger 16) total_burned:(VarUInteger 16)
+    hgram_pending:(VarUInteger 16) hpo_pending:(VarUInteger 16)
+    deposit_count:uint32 swap_count:uint32 burn_count:uint32
+    query_id:uint64 = Counters;
+
+// ---- logs, as external-out messages ----
+
+log_received#_ op:uint32 amount:(VarUInteger 16) total_received:(VarUInteger 16)
+    src:MsgAddress = LogReceived;                                            // topic 0x1
+log_deposit#_ query_id:uint64 amount:(VarUInteger 16) = LogDeposit;           // topic 0x2
+log_swap#_ query_id:uint64 amount:(VarUInteger 16)
+    total_swapped:(VarUInteger 16) = LogSwap;                                // topic 0x3
+log_burn#_ query_id:uint64 amount:(VarUInteger 16)
+    total_burned:(VarUInteger 16) = LogBurn;                                 // topic 0x4
+log_discovery#_ query_id:uint64 = LogDiscovery;                              // topic 0x5

@@ -1,0 +1,7 @@
+node_modules
+temp
+build
+.DS_Store
+.vscode
+blueprint.config.ts
+docs/internal

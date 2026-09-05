@@ -1,0 +1,581 @@
+;; HPO burner.
+;;
+;; Any GRAM that arrives here is staked into Hipo, the hGRAM is spent buying HPO on DeDust, and
+;; the HPO is burned. The Hipo treasury is the intended payer -- it forwards a share of each
+;; borrower's reward on loan recovery -- but the contract does not care who pays: a plain
+;; transfer, a comment, or a small poke from anyone all work the same way.
+;;
+;; The contract has no owner, no admin op and no upgrade path. What it can do is fixed at
+;; deployment. See docs/specs/2026-09-04-hpo-burner.md.
+;;
+;; The cycle. Three legs, each ending in a message back to us that starts the next:
+;;
+;;   GRAM in ─▶ Hipo treasury (deposit_coins)
+;;           ─▶ our hGRAM wallet mints, and notifies us
+;;           ─▶ DeDust hGRAM vault (send_tokens, swap in the forward payload)
+;;           ─▶ pool ─▶ HPO vault ─▶ our HPO wallet, which notifies us
+;;           ─▶ our HPO wallet (burn) ─▶ HPO master, total_supply drops
+;;
+;; Staking rather than buying HPO with GRAM directly is deliberate: the GRAM stays in Hipo as
+;; TVL, and the trade lands in the HPO/hGRAM pair.
+;;
+;; Two things shape the whole implementation:
+;;
+;;   Everything is driven off balances and pending amounts rather than off the size of the
+;;   message that arrived, so a leg that fails or returns change self-heals -- the next trigger
+;;   picks up whatever is sitting here.
+;;
+;;   There is no swap cap and no slippage limit. How much to trade and where is a protocol
+;;   decision about HPO liquidity, fixed at deployment rather than exposed as a parameter.
+
+#include "imports/stdlib.fc";
+#include "imports/constants.fc";
+#include "imports/utils.fc";
+
+
+;; ---------------------------------------------------------------------------------------------
+;; Storage
+;; ---------------------------------------------------------------------------------------------
+
+global slice hgram_wallet;    ;; our Hipo wallet, addr_none until TEP-89 discovery answers
+global slice hpo_wallet;      ;; our HPO wallet, likewise
+
+;; The rescue hatch. The owner cannot redirect the burn -- the route is in the code -- but can
+;; move assets that have fallen out of the cycle, which is the failure this contract cannot
+;; otherwise recover from. addr_none means ownership has been dropped and the contract is
+;; permanently immutable; see op::drop_ownership.
+global slice owner;
+global slice pending_owner;   ;; ownership transfer is two-step, so a typo cannot destroy the hatch
+
+global int total_received;    ;; GRAM ever received as payment, excluding our own returned change
+global int total_deposited;   ;; GRAM ever staked into Hipo
+global int total_swapped;     ;; hGRAM ever sent into the pool
+global int total_burned;      ;; HPO ever burned
+
+;; What we believe is sitting in our jetton wallets, waiting for the next leg. These are what
+;; make the cycle resumable: a leg that could not be sent leaves its amount here, and any later
+;; trigger retries it. Without them a failed swap or burn would strand tokens permanently, which
+;; matters more than usual in a contract nobody can reach into.
+global int hgram_pending;
+global int hpo_pending;
+
+global int deposit_count;
+global int swap_count;
+global int burn_count;
+global int query_id;          ;; monotonic, so every outgoing op is traceable in an explorer
+
+() load_data() impure inline {
+    slice ds = get_data().begin_parse();
+    hgram_wallet = ds~load_msg_addr();
+    hpo_wallet = ds~load_msg_addr();
+    slice os = ds~load_ref().begin_parse();
+    owner = os~load_msg_addr();
+    pending_owner = os~load_msg_addr();
+    os.end_parse();
+    slice cs = ds~load_ref().begin_parse();
+    ds.end_parse();
+    total_received = cs~load_coins();
+    total_deposited = cs~load_coins();
+    total_swapped = cs~load_coins();
+    total_burned = cs~load_coins();
+    hgram_pending = cs~load_coins();
+    hpo_pending = cs~load_coins();
+    deposit_count = cs~load_uint(32);
+    swap_count = cs~load_uint(32);
+    burn_count = cs~load_uint(32);
+    query_id = cs~load_uint(64);
+    cs.end_parse();
+}
+
+() save_data() impure inline {
+    ;; Ownership and the counters each go in a ref: the two wallet addresses already take 534 of
+    ;; the root cell's 1023 bits, and neither the two ownership addresses nor the six coins plus
+    ;; counts would fit alongside them at their type maximum.
+    set_data(
+        begin_cell()
+            .store_slice(hgram_wallet)
+            .store_slice(hpo_wallet)
+            .store_ref(
+                begin_cell()
+                    .store_slice(owner)
+                    .store_slice(pending_owner)
+                    .end_cell()
+            )
+            .store_ref(
+                begin_cell()
+                    .store_coins(total_received)
+                    .store_coins(total_deposited)
+                    .store_coins(total_swapped)
+                    .store_coins(total_burned)
+                    .store_coins(hgram_pending)
+                    .store_coins(hpo_pending)
+                    .store_uint(deposit_count, 32)
+                    .store_uint(swap_count, 32)
+                    .store_uint(burn_count, 32)
+                    .store_uint(query_id, 64)
+                    .end_cell()
+            )
+            .end_cell()
+    );
+}
+
+int known?(slice address) inline {
+    ;; addr_none$00 is two bits; a stored addr_std is 267.
+    return address.slice_bits() > 2;
+}
+
+int ready?() inline {
+    return known?(hgram_wallet) & known?(hpo_wallet);
+}
+
+
+;; ---------------------------------------------------------------------------------------------
+;; Discovery
+;; ---------------------------------------------------------------------------------------------
+
+;; Ask a jetton master which wallet belongs to us. The answer is only believed back from the
+;; master itself, which is what later makes it safe to act on a transfer_notification: a
+;; notification from anywhere else is ignored, so a worthless token cannot induce a swap or a
+;; burn, or spend the gas reserve.
+() ask_wallet(builder master) impure inline {
+    query_id += 1;
+    ;; provide_wallet_address#2c76b973 query_id:uint64 owner_address:MsgAddr include_address:Bool
+    builder body = begin_cell()
+        .store_uint(op::provide_wallet_address, 32)
+        .store_uint(query_id, 64)
+        .store_slice(my_address())
+        .store_uint(0, 1);
+    send_msg(true, master, body, budget::discovery_gas, send::pay_gas_separately + send::ignore_errors);
+}
+
+() discover() impure inline {
+    ifnot known?(hgram_wallet) {
+        ask_wallet(create_address(hipo::parent::wc, hipo::parent::addr));
+    }
+    ifnot known?(hpo_wallet) {
+        ask_wallet(create_address(hpo::wc, hpo::addr));
+    }
+    emit_log(log::discovery, begin_cell().store_uint(query_id, 64));
+}
+
+
+;; ---------------------------------------------------------------------------------------------
+;; Leg 1 -- stake the GRAM
+;; ---------------------------------------------------------------------------------------------
+
+;; Deposit everything above the reserve.
+;;
+;; The amount comes from the balance rather than from the message that triggered this, so change
+;; returned by an earlier cycle, a donation, and a payment that landed while discovery was still
+;; running are all picked up together.
+;;
+;; coins is sent as 0, which Hipo reads as "stake the maximum this message can pay for" -- the
+;; treasury subtracts its own fee and stakes the rest. That avoids having to know the fee, which
+;; is dynamic and cannot be read synchronously from here.
+() try_deposit() impure inline {
+    int available = get_balance().pair_first() - budget::reserve;
+    if available < budget::min_deposit {
+        return ();
+    }
+
+    query_id += 1;
+    ;; deposit_coins#3d3761a6 query_id:uint64 owner:MsgAddr coins:Coins
+    ;;   ownership_assigned_amount:Coins referrer:MsgAddr
+    builder body = begin_cell()
+        .store_uint(op::deposit_coins, 32)
+        .store_uint(query_id, 64)
+        .store_uint(0, 2)   ;; owner addr_none, which Hipo reads as the sender: us
+        .store_coins(0)     ;; stake the maximum
+        .store_coins(0)     ;; no bill ownership assignment; instant_mint is on
+        .store_uint(0, 2);  ;; no referrer
+
+    ;; Bounceable: if the treasury refuses -- halted, or the amount too small to mint a token --
+    ;; the GRAM must come back rather than vanish, and the next trigger will retry it.
+    send_msg(
+        true, create_address(hipo::treasury::wc, hipo::treasury::addr), body, available,
+        send::pay_gas_separately + send::ignore_errors
+    );
+
+    total_deposited += available;
+    deposit_count += 1;
+    emit_log(log::deposit, begin_cell().store_uint(query_id, 64).store_coins(available));
+}
+
+
+;; ---------------------------------------------------------------------------------------------
+;; Leg 2 -- spend the hGRAM on HPO
+;; ---------------------------------------------------------------------------------------------
+
+;; Send the whole pending hGRAM balance into the DeDust vault, with the swap as the forward
+;; payload. Hipo's send_tokens carries TEP-74's op code and forwards the payload through, so from
+;; DeDust's side this is an ordinary jetton swap.
+;;
+;; limit is 0: no minimum output. A contract cannot read pool reserves synchronously, so any
+;; stored bound would be stale; and these buys are predictable in size and schedule, so anyone
+;; can pre-position against them regardless. Neither is fixable here -- slippage belongs to the
+;; liquidity decision, not to this code.
+() try_swap() impure inline {
+    if hgram_pending <= 0 {
+        return ();
+    }
+    if get_balance().pair_first() < budget::reserve {
+        ;; Not enough left to pay for the leg. Keep the amount pending; a later trigger retries.
+        return ();
+    }
+
+    ;; swap#e3a0d482 pool:MsgAddr kind:(##1) limit:Coins next:(Maybe ^SwapStep)
+    ;;   swap_params:^SwapParams
+    ;; swap_params$_ deadline:uint32 recipient:MsgAddr referral:MsgAddr
+    ;;   fulfill_payload:(Maybe ^Cell) reject_payload:(Maybe ^Cell)
+    cell swap_params = begin_cell()
+        .store_uint(0, 32)          ;; no deadline
+        .store_slice(my_address())  ;; the HPO comes back to us
+        .store_uint(0, 2)           ;; no referral
+        .store_uint(0, 1)           ;; no fulfill payload
+        .store_uint(0, 1)           ;; no reject payload
+        .end_cell();
+    cell swap = begin_cell()
+        .store_uint(op::dedust_swap, 32)
+        .store_builder(create_address(dedust::pool::wc, dedust::pool::addr))
+        .store_uint(0, 1)           ;; kind: given in
+        .store_coins(0)             ;; limit: none
+        .store_uint(0, 1)           ;; no next step
+        .store_ref(swap_params)
+        .end_cell();
+
+    int amount = hgram_pending;
+    query_id += 1;
+    ;; send_tokens#0f8a7ea5 query_id:uint64 amount:Coins recipient:MsgAddr return_excess:MsgAddr
+    ;;   custom_payload:(Maybe ^Cell) forward_ton_amount:Coins forward_payload:(Either Cell ^Cell)
+    builder body = begin_cell()
+        .store_uint(op::send_tokens, 32)
+        .store_uint(query_id, 64)
+        .store_coins(amount)
+        .store_builder(create_address(dedust::hgram_vault::wc, dedust::hgram_vault::addr))
+        .store_slice(my_address())  ;; return_excess
+        .store_uint(0, 1)           ;; no custom payload
+        .store_coins(budget::swap_forward)
+        .store_uint(1, 1)           ;; forward payload in a ref
+        .store_ref(swap);
+
+    ;; Bounceable so a refused send comes back and can be re-counted below.
+    send_msg(
+        true, hgram_wallet.to_builder(), body, budget::swap_gas,
+        send::pay_gas_separately + send::bounce_on_action_fail
+    );
+
+    hgram_pending = 0;
+    total_swapped += amount;
+    swap_count += 1;
+    emit_log(log::swap, begin_cell().store_uint(query_id, 64).store_coins(amount).store_coins(total_swapped));
+}
+
+
+;; ---------------------------------------------------------------------------------------------
+;; Leg 3 -- burn the HPO
+;; ---------------------------------------------------------------------------------------------
+
+;; Burn the whole pending HPO balance. op::burn makes the wallet send burn_notification to the
+;; master, which lowers total_supply. This is the only jetton op the contract ever emits towards
+;; HPO: there is no code path that transfers it anywhere.
+() try_burn() impure inline {
+    if hpo_pending <= 0 {
+        return ();
+    }
+    if get_balance().pair_first() < 2 * budget::burn_gas {
+        ;; Not enough left to pay for the leg and still have something afterwards. Keep the
+        ;; amount pending; a later trigger retries it.
+        return ();
+    }
+
+    int amount = hpo_pending;
+    query_id += 1;
+    ;; burn#595f07bc query_id:uint64 amount:Coins response_destination:MsgAddr
+    ;;   custom_payload:(Maybe ^Cell)
+    builder body = begin_cell()
+        .store_uint(op::burn, 32)
+        .store_uint(query_id, 64)
+        .store_coins(amount)
+        .store_slice(my_address())  ;; excesses come back and fund the next cycle
+        .store_uint(0, 1);
+    send_msg(
+        true, hpo_wallet.to_builder(), body, budget::burn_gas,
+        send::pay_gas_separately + send::bounce_on_action_fail
+    );
+
+    hpo_pending = 0;
+    total_burned += amount;
+    burn_count += 1;
+    emit_log(log::burn, begin_cell().store_uint(query_id, 64).store_coins(amount).store_coins(total_burned));
+}
+
+
+;; ---------------------------------------------------------------------------------------------
+;; The rescue hatch
+;; ---------------------------------------------------------------------------------------------
+;;
+;; The burn path takes no parameters and cannot be pointed anywhere else: the pool, the vault and
+;; the two masters are compile-time constants, and the only op this contract ever sends towards
+;; HPO is op::burn. What the owner can do is move assets that have fallen *out* of that path.
+;;
+;; That is the one failure the contract cannot recover from on its own. If DeDust stops serving
+;; the pool, hGRAM piles up here with no way to spend it and no way to get it back out; a poke
+;; retries the swap forever against a route that will never answer. Everything else self-heals,
+;; but that does not, and the funds are real.
+;;
+;; The cost is honest and worth stating: while an owner exists, the burn is trusted rather than
+;; purely mechanical. op::drop_ownership is the answer to that -- ownership can be given up once
+;; the route has proven itself, making the contract permanently immutable without a redeploy.
+
+int is_owner?(slice src) inline {
+    return known?(owner) & equal_slice_bits(src, owner);
+}
+
+;; Send an arbitrary message on the contract's behalf.
+;;
+;; Deliberately general rather than one op per asset. GRAM, hGRAM, HPO and any jetton that has
+;; not been invented yet all come out through the same path, because the shape of a rescue cannot
+;; be predicted -- if it could, the situation would have been designed out instead.
+() withdraw(slice s) impure inline {
+    int mode = s~load_uint(8);
+    cell message = s~load_ref();
+    s.end_parse();
+    send_raw_message(message, mode);
+}
+
+
+;; ---------------------------------------------------------------------------------------------
+;; Entry point
+;; ---------------------------------------------------------------------------------------------
+
+() recv_internal(int my_balance, int msg_value, cell in_msg_full, slice s) impure {
+    slice cs = in_msg_full.begin_parse();
+    int flags = cs~load_uint(4);
+    slice src = cs~load_msg_addr();
+
+    load_data();
+
+    if flags & 1 {
+        ;; A bounce. A leg that could not be delivered has to put its amount back on the pending
+        ;; pile, or the tokens it was moving would be stranded with nothing to retry them.
+        ;;
+        ;; A bounce carries only the first 256 bits of the original body, so check the length
+        ;; before reading: throwing here would abort a transaction that has nothing to undo. The
+        ;; sender is checked too, so a counter can only be moved back by the wallet that moved it
+        ;; forward.
+        if s.slice_bits() >= 32 + 32 + 64 {
+            s~skip_bits(32); ;; 0xffffffff
+            int op = s~load_uint(32);
+            s~load_uint(64);
+            if (op == op::send_tokens) & known?(hgram_wallet) & equal_slice_bits(src, hgram_wallet) {
+                int amount = s~load_coins();
+                hgram_pending += amount;
+                total_swapped -= amount;
+                swap_count -= 1;
+            }
+            if (op == op::burn) & known?(hpo_wallet) & equal_slice_bits(src, hpo_wallet) {
+                int amount = s~load_coins();
+                hpo_pending += amount;
+                total_burned -= amount;
+                burn_count -= 1;
+            }
+            ;; A bounced deposit_coins needs nothing: the GRAM is back in the balance, and the
+            ;; next trigger sweeps it.
+        }
+        save_data();
+        return ();
+    }
+
+    int op = s.slice_bits() >= 32 ? s~load_uint(32) : 0;
+
+    ;; A master answering discovery. Only ever believed from the master it was asked of, and only
+    ;; while the address is still unset, so neither can be repointed later.
+    if op == op::take_wallet_address {
+        s~load_uint(64);
+        slice reported = s~load_msg_addr();
+        if equal_addresses?(src, create_address(hipo::parent::wc, hipo::parent::addr)) {
+            ifnot known?(hgram_wallet) {
+                hgram_wallet = reported;
+            }
+        }
+        if equal_addresses?(src, create_address(hpo::wc, hpo::addr)) {
+            ifnot known?(hpo_wallet) {
+                hpo_wallet = reported;
+            }
+        }
+        save_data();
+        return ();
+    }
+
+    ;; Tokens arrived. Which leg this is depends only on which of our two wallets sent it, and
+    ;; every other sender is ignored.
+    if op == op::transfer_notification {
+        s~load_uint(64);
+        int amount = s~load_coins();
+        if known?(hgram_wallet) & equal_slice_bits(src, hgram_wallet) {
+            ;; The deposit minted, or DeDust handed hGRAM back. Either way it is ours to spend.
+            hgram_pending += amount;
+            try_swap();
+        } elseif known?(hpo_wallet) & equal_slice_bits(src, hpo_wallet) {
+            hpo_pending += amount;
+            try_burn();
+        }
+        save_data();
+        return ();
+    }
+
+    ;; Owner ops. Checked before anything else that carries value, so an owner's message is never
+    ;; mistaken for a payment and never starts a cycle with the GRAM it arrived with. A non-owner
+    ;; sending one of these throws rather than being treated as a donor, so the mistake bounces
+    ;; and the sender keeps their money.
+    if (op == op::withdraw) | (op == op::reset_pending) | (op == op::transfer_ownership)
+        | (op == op::claim_ownership) | (op == op::drop_ownership) {
+
+        if op == op::claim_ownership {
+            ;; The second half of the two-step transfer. Only the nominated address can complete
+            ;; it, which is what stops a mistyped owner from quietly destroying the hatch.
+            throw_unless(err::access_denied, known?(pending_owner) & equal_slice_bits(src, pending_owner));
+            owner = pending_owner;
+            pending_owner = begin_cell().store_uint(0, 2).end_cell().begin_parse();
+            save_data();
+            return ();
+        }
+
+        throw_unless(err::access_denied, is_owner?(src));
+        s~load_uint(64); ;; query_id
+
+        if op == op::withdraw {
+            withdraw(s);
+        }
+
+        if op == op::reset_pending {
+            ;; Needed for a withdrawal to actually finish. Pulling stuck tokens out of the wallets
+            ;; leaves the pending amounts claiming they are still there, and every later trigger
+            ;; would retry a leg for tokens that have gone -- failing, bouncing, and re-adding
+            ;; itself, bleeding the gas reserve on each payment. This is how the books are squared
+            ;; with reality afterwards.
+            hgram_pending = s~load_coins();
+            hpo_pending = s~load_coins();
+        }
+
+        if op == op::transfer_ownership {
+            pending_owner = s~load_msg_addr();
+        }
+
+        if op == op::drop_ownership {
+            ;; One way, on purpose. After this the contract is exactly what it claims to be: a
+            ;; mechanism, with nobody able to reach into it. There is no path back.
+            owner = begin_cell().store_uint(0, 2).end_cell().begin_parse();
+            pending_owner = begin_cell().store_uint(0, 2).end_cell().begin_parse();
+        }
+
+        save_data();
+        return ();
+    }
+
+    ;; Money coming back out of our own machinery is not a payment and must never start a cycle.
+    ;;
+    ;; Several addresses return GRAM here: the parent and the HPO master reply to discovery and
+    ;; refund the burn's excesses, our two jetton wallets return unspent forward amounts, and the
+    ;; DeDust vaults and pool refund a swap they will not serve. Because spending is
+    ;; balance-driven, treating any of them as a payment would start a fresh deposit whose own
+    ;; change would start another -- a cascade that empties the balance in one chain of
+    ;; transactions and fills the explorer with junk.
+    ;;
+    ;; The treasury is deliberately absent from this list: it is the payer, and it does not send
+    ;; change back on the deposit path -- the leftover rides with the mint notification instead.
+    ;;
+    ;; Nothing is lost by ignoring these. They raise the balance, and the next payment or poke
+    ;; sweeps them.
+    int from_route? =
+        ;; Excess messages are returned change by definition, whoever sends them. Checking the op
+        ;; rather than the sender is what catches the ones whose address cannot be known at
+        ;; compile time -- notably the DeDust vault's own hGRAM wallet, which returns the unspent
+        ;; part of the swap's forward amount to whoever asked for the excess, and which is derived
+        ;; from the vault and the parent rather than being a constant.
+        (op == op::gas_excess)
+        | equal_addresses?(src, create_address(hipo::parent::wc, hipo::parent::addr))
+        | equal_addresses?(src, create_address(hpo::wc, hpo::addr))
+        | equal_addresses?(src, create_address(dedust::hgram_vault::wc, dedust::hgram_vault::addr))
+        | equal_addresses?(src, create_address(dedust::hpo_vault::wc, dedust::hpo_vault::addr))
+        | equal_addresses?(src, create_address(dedust::pool::wc, dedust::pool::addr))
+        | (known?(hgram_wallet) & equal_slice_bits(src, hgram_wallet))
+        | (known?(hpo_wallet) & equal_slice_bits(src, hpo_wallet));
+    if from_route? {
+        save_data();
+        return ();
+    }
+
+    ;; Anything else carrying GRAM is a payment: op::take_borrower_fee from the treasury, a bare
+    ;; transfer, a comment, a poke. Returned change is excluded above, so total_received means
+    ;; income and not the contract's own money coming back.
+    total_received += msg_value;
+    emit_log(
+        log::received,
+        begin_cell().store_uint(op, 32).store_coins(msg_value).store_coins(total_received).store_slice(src)
+    );
+
+    ifnot ready?() {
+        ;; Stake nothing until both wallets are known: the hGRAM would arrive with no way to
+        ;; prove the notification was ours. The GRAM waits and is swept once discovery lands.
+        discover();
+        save_data();
+        return ();
+    }
+
+    ;; A stuck leg is finished before a new cycle is started, one per trigger. That keeps a
+    ;; single transaction from having to fund three legs at once, and makes repeated pokes a
+    ;; sufficient recovery tool for anyone, with no owner needed.
+    if hpo_pending > 0 {
+        try_burn();
+    } elseif hgram_pending > 0 {
+        try_swap();
+    } else {
+        try_deposit();
+    }
+    save_data();
+}
+
+
+;; ---------------------------------------------------------------------------------------------
+;; Getters
+;; ---------------------------------------------------------------------------------------------
+
+;; Everything the tokenomics chart needs from one call.
+(slice, slice, int, int, int, int) get_burner_data() method_id {
+    load_data();
+    return (hgram_wallet, hpo_wallet, total_received, total_deposited, total_swapped, total_burned);
+}
+
+;; Who, if anyone, can reach into this contract. An addr_none owner means the hatch has been
+;; given up and the burn is mechanical rather than trusted.
+(slice, slice) get_ownership() method_id {
+    load_data();
+    return (owner, pending_owner);
+}
+
+;; What is mid-cycle. Non-zero pending amounts with a stale query_id mean a leg is stuck and a
+;; poke is needed.
+(int, int, int, int, int, int) get_progress() method_id {
+    load_data();
+    return (hgram_pending, hpo_pending, deposit_count, swap_count, burn_count, query_id);
+}
+
+;; What the next deposit would stake, so "waiting for the threshold" can be told from "stuck".
+int get_depositable() method_id {
+    int available = get_balance().pair_first() - budget::reserve;
+    if available < budget::min_deposit {
+        return 0;
+    }
+    return available;
+}
+
+;; The route, so it can be checked against the live pool without reading the code.
+(slice, slice, slice, slice) get_route() method_id {
+    return (
+        create_address(hipo::treasury::wc, hipo::treasury::addr).end_cell().begin_parse(),
+        create_address(hipo::parent::wc, hipo::parent::addr).end_cell().begin_parse(),
+        create_address(dedust::hgram_vault::wc, dedust::hgram_vault::addr).end_cell().begin_parse(),
+        create_address(dedust::pool::wc, dedust::pool::addr).end_cell().begin_parse()
+    );
+}

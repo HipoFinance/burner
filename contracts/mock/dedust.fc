@@ -1,0 +1,139 @@
+;; A stand-in for DeDust's hGRAM vault, pool and HPO vault, for tests only.
+;;
+;; The burner enters the route with one message -- a jetton transfer into the vault carrying
+;; op::dedust_swap as its forward payload -- so a mock that accepts that notification and pays out
+;; HPO exercises the real code path. It is deployed at the hGRAM vault address the burner has
+;; hardcoded, via setShardAccount.
+;;
+;; Modes:
+;;   0  fill    -- pay out floor(amount * rate / 1e9) HPO to the swap's recipient
+;;   1  refund  -- return the hGRAM to the sender, as DeDust does when it will not serve a swap
+;;   2  silent  -- keep everything and answer nothing, the "pool is gone" case
+
+#include "../imports/stdlib.fc";
+#include "../imports/constants.fc";
+#include "../imports/utils.fc";
+
+const int op::jetton_transfer = 0xf8a7ea5;
+
+global slice own_hgram_wallet;
+global slice own_hpo_wallet;
+global int rate;
+global int mode;
+global int last_limit;
+global int swaps_served;
+
+() load_data() impure inline {
+    slice ds = get_data().begin_parse();
+    own_hgram_wallet = ds~load_msg_addr();
+    own_hpo_wallet = ds~load_msg_addr();
+    slice cs = ds~load_ref().begin_parse();
+    ds.end_parse();
+    rate = cs~load_uint(64);
+    mode = cs~load_uint(2);
+    last_limit = cs~load_coins();
+    swaps_served = cs~load_uint(32);
+    cs.end_parse();
+}
+
+() save_data() impure inline {
+    set_data(
+        begin_cell()
+            .store_slice(own_hgram_wallet)
+            .store_slice(own_hpo_wallet)
+            .store_ref(
+                begin_cell()
+                    .store_uint(rate, 64)
+                    .store_uint(mode, 2)
+                    .store_coins(last_limit)
+                    .store_uint(swaps_served, 32)
+                    .end_cell()
+            )
+            .end_cell()
+    );
+}
+
+() recv_internal(int my_balance, int msg_value, cell in_msg_full, slice s) impure {
+    slice cs = in_msg_full.begin_parse();
+    int flags = cs~load_uint(4);
+    if flags & 1 {
+        return ();
+    }
+    slice src = cs~load_msg_addr();
+    if s.slice_bits() < 32 {
+        return ();
+    }
+    load_data();
+    int op = s~load_uint(32);
+    if op != op::transfer_notification {
+        return ();
+    }
+    ;; Only our own hGRAM wallet can tell us hGRAM arrived.
+    throw_unless(901, equal_slice_bits(src, own_hgram_wallet));
+
+    int query_id = s~load_uint(64);
+    int amount = s~load_coins();
+    slice sender = s~load_msg_addr();
+
+    ;; forward_payload is Either Cell ^Cell; the burner always uses a ref.
+    int in_ref = s~load_uint(1);
+    throw_unless(902, in_ref);
+    slice swap = s~load_ref().begin_parse();
+
+    throw_unless(903, swap~load_uint(32) == op::dedust_swap);
+    slice pool = swap~load_msg_addr();
+    throw_unless(904, equal_addresses?(pool, create_address(dedust::pool::wc, dedust::pool::addr)));
+    swap~load_uint(1);              ;; kind
+    int limit = swap~load_coins();
+    swap~load_uint(1);              ;; next
+    slice params = swap~load_ref().begin_parse();
+    params~load_uint(32);           ;; deadline
+    slice recipient = params~load_msg_addr();
+
+    last_limit = limit;
+
+    if mode == 2 {
+        save_data();
+        return ();
+    }
+
+    if mode == 1 {
+        ;; Hand the hGRAM back to whoever sent it, with a forward amount so the burner is told.
+        builder body = begin_cell()
+            .store_uint(op::jetton_transfer, 32)
+            .store_uint(query_id, 64)
+            .store_coins(amount)
+            .store_slice(sender)
+            .store_slice(sender)
+            .store_uint(0, 1)
+            .store_coins(50000000)
+            .store_uint(0, 1);
+        send_msg(true, own_hgram_wallet.to_builder(), body, 200000000,
+            send::pay_gas_separately + send::ignore_errors);
+        save_data();
+        return ();
+    }
+
+    int out = muldiv(amount, rate, 1000000000);
+    throw_unless(905, out >= limit);
+
+    builder body = begin_cell()
+        .store_uint(op::jetton_transfer, 32)
+        .store_uint(query_id, 64)
+        .store_coins(out)
+        .store_slice(recipient)
+        .store_slice(recipient)
+        .store_uint(0, 1)
+        .store_coins(50000000)   ;; forward_ton_amount, so a transfer_notification is emitted
+        .store_uint(0, 1);
+    send_msg(true, own_hpo_wallet.to_builder(), body, 250000000,
+        send::pay_gas_separately + send::ignore_errors);
+
+    swaps_served += 1;
+    save_data();
+}
+
+(slice, slice, int, int, int, int) get_mock_data() method_id {
+    load_data();
+    return (own_hgram_wallet, own_hpo_wallet, rate, mode, last_limit, swaps_served);
+}
