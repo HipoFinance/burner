@@ -1,9 +1,16 @@
 import { Address, fromNano } from '@ton/core'
-import { compile, NetworkProvider } from '@ton/blueprint'
+import { NetworkProvider } from '@ton/blueprint'
 
-import { Burner, emptyBurnerConfig } from '../wrappers/Burner'
+import { Burner } from '../wrappers/Burner'
 
 const POOL = Address.parse('EQCXJu7zUBQILdzt1nIzz_NhDfVZ-FyEdnccFDYDPRaAqfqU')
+
+/**
+ * The deployed burner. Hardcoded rather than derived: the address comes from the initial state,
+ * which includes the original owner, so a derivation stops reproducing it the moment ownership
+ * moves. This is read-only, so it just reads the real one.
+ */
+const BURNER = Address.parse('EQAGPJMxJ73OLpHUgQhI5YeQe2ZuAuUQ-4f_zfN4rV2Fl6Jp')
 
 const gram = (v: bigint) => `${fromNano(v)} GRAM`
 const hgram = (v: bigint) => `${fromNano(v)} hGRAM`
@@ -12,8 +19,7 @@ const hpo = (v: bigint) => `${fromNano(v)} HPO`
 export async function run(provider: NetworkProvider) {
     const ui = provider.ui()
 
-    const code = await compile('Burner')
-    const burner = provider.open(Burner.createFromConfig(emptyBurnerConfig(), code))
+    const burner = provider.open(Burner.createFromAddress(BURNER))
 
     if (!(await provider.isContractDeployed(burner.address))) {
         ui.write(`Not deployed: ${burner.address.toString()}`)
