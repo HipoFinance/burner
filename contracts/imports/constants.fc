@@ -16,7 +16,7 @@ const int hipo::treasury::wc = 0;
 const int hipo::treasury::addr = 0x8bc991cfe177bc7e9721433efa3befd199485a55cffd040a06c89af026b71bcf;
 
 ;; The parent, EQDPdq8xjAhytYqfGSX8KcFWIReCufsB9Wdg0pLlYSO_h76w -- the hGRAM jetton master. Read
-;; back from the treasury's own get_treasury_state (index 5), not from a constants file, so the
+;; back from the treasury's own get_treasury_state (index 6), not from a constants file, so the
 ;; two cannot disagree. Answers TEP-89, which is how the burner learns its hGRAM wallet.
 const int hipo::parent::wc = 0;
 const int hipo::parent::addr = 0xcf76af318c0872b58a9f1925fc29c156211782b9fb01f56760d292e56123bf87;

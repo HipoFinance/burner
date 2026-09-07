@@ -40,8 +40,13 @@ export async function run(provider: NetworkProvider) {
     const problems: string[] = []
 
     // 1. The treasury's parent must be the hGRAM master the contract will discover against.
+    // parent sits at index 6. It was 5 until a deficit field was inserted ahead of it, which made
+    // this read an integer as an address and abort the whole check. The tuple only grows by
+    // appending now, so 6 is stable, but skipping a fixed count is only ever as good as the last
+    // time someone looked -- if this throws, count the fields in get_treasury_state again.
+    const treasuryParentIndex = 6
     const { stack: treasuryState } = await provider.provider(HIPO_TREASURY).get('get_treasury_state', [])
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < treasuryParentIndex; i++) {
         treasuryState.skip(1)
     }
     const parent = treasuryState.readAddress()
