@@ -1,0 +1,16 @@
+;; A migrator that succeeds and then leaves storage the new code cannot read, for the tests only.
+;;
+;; This is the failure that would be unrecoverable if it were ever allowed to commit: recv_internal
+;; calls load_data() before it dispatches, so a burner whose storage does not parse cannot receive
+;; another upgrade_code either. upgrade_data runs the new load_data() itself, inside the same
+;; transaction and before anything is committed, precisely so this reverts instead.
+
+#include "../../imports/stdlib.fc";
+
+() migrate() impure method_id(0x6d67) {
+    begin_cell().store_uint(0, 8).end_cell().set_data();
+}
+
+() recv_internal(cell in_msg_full, slice in_msg_body) impure {
+    throw(0xffff);
+}

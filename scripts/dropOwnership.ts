@@ -10,6 +10,10 @@ import { beginOwnerAction, confirm, gram, jettonBalance } from '../wrappers/oper
  * burn stops being trusted and starts being mechanical, which is the point of doing it -- but
  * there is no path back, and anything left inside is left there for good.
  *
+ * It freezes the code as well as the hatch. op::upgrade_code is owner-gated, so dropping ownership
+ * is what turns an upgradable contract back into the immutable one it was first deployed as, and
+ * it is the reason upgradability is acceptable at all.
+ *
  * So this script checks what would be abandoned before it lets you.
  */
 export async function run(provider: NetworkProvider) {
@@ -48,7 +52,8 @@ export async function run(provider: NetworkProvider) {
     }
 
     ui.write('This cannot be undone. There is no recovery, no redeploy that reclaims these funds,')
-    ui.write('and no governance action that restores access.')
+    ui.write('and no governance action that restores access. It also freezes the code: after this')
+    ui.write('the burner can never be upgraded again, only replaced at a new address.')
     ui.write('')
 
     if (!(await confirm(provider, 'Permanently drop ownership?'))) {

@@ -1,0 +1,12 @@
+;; A migrator that throws, for the tests only. The upgrade must revert whole: old code, old data,
+;; and a burner that still runs a cycle afterwards.
+
+#include "../../imports/stdlib.fc";
+
+() migrate() impure method_id(0x6d67) {
+    throw(0xdead);
+}
+
+() recv_internal(cell in_msg_full, slice in_msg_body) impure {
+    throw(0xffff);
+}

@@ -1,0 +1,15 @@
+;; A stand-in "next version" of the burner, for the upgrade tests only.
+;;
+;; It is the real contract plus a version getter, and nothing else. The point of an upgrade test is
+;; that state survives and the cycle keeps running afterwards, so the code being installed has to be
+;; a working burner rather than a stub. Including burner.fc instead of copying it is what keeps that
+;; true as the contract changes: this file cannot drift out of date.
+;;
+;; The storage layout is unchanged, which is what makes it the right subject for the no-migration
+;; case. The migrators alongside it cover the layout-changing ones.
+
+#include "../burner.fc";
+
+int get_version() method_id {
+    return 2;
+}

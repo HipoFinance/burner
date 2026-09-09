@@ -1,0 +1,33 @@
+;; A migrator that writes valid storage with no owner in it, for the tests only.
+;;
+;; Everything parses; the contract would simply have nobody able to reach it, and no way back --
+;; the same end state as op::drop_ownership but reached by accident. upgrade_data re-checks the
+;; owner after the new load_data() rather than before the migration, so this reverts.
+
+#include "../../imports/stdlib.fc";
+
+() migrate() impure method_id(0x6d67) {
+    slice ds = get_data().begin_parse();
+    slice hgram_wallet = ds~load_msg_addr();
+    slice hpo_wallet = ds~load_msg_addr();
+    ds~load_ref(); ;; ownership, replaced below
+    cell counters = ds~load_ref();
+    ds.end_parse();
+
+    begin_cell()
+        .store_slice(hgram_wallet)
+        .store_slice(hpo_wallet)
+        .store_ref(
+            begin_cell()
+                .store_uint(0, 2) ;; owner: addr_none
+                .store_uint(0, 2) ;; pending_owner: addr_none
+                .end_cell()
+        )
+        .store_ref(counters)
+        .end_cell()
+        .set_data();
+}
+
+() recv_internal(cell in_msg_full, slice in_msg_body) impure {
+    throw(0xffff);
+}

@@ -9,6 +9,8 @@ import {
     contractAddress,
 } from '@ton/core'
 
+import { UpgradeOptions, upgradeCodeBody } from './rescue'
+
 /** op::take_borrower_fee, as sent by the Hipo treasury on every loan recovery. */
 export const opTakeBorrowerFee = 0x5e2d81f4
 
@@ -38,7 +40,8 @@ export const budget = {
     swapForward: 300000000n,
     burnGas: 100000000n,
     discoveryGas: 50000000n,
-    minDeposit: 1000000000n,
+    depositForward: 500000000n,
+    minDeposit: 2000000000n,
 } as const
 
 export interface BurnerConfig {
@@ -264,6 +267,24 @@ export class Burner implements Contract {
             value,
             sendMode: SendMode.PAY_GAS_SEPARATELY,
             body: beginCell().storeUint(opDropOwnership, 32).storeUint(queryId, 64).endCell(),
+        })
+    }
+
+    /**
+     * Install new code, optionally running a storage migration on the way.
+     *
+     * The body comes from wrappers/rescue.ts, so the tests exercise the same builder the upgrade
+     * script sends. Owner only, and `drop_ownership` closes this along with the rescue hatch.
+     */
+    async sendUpgradeCode(
+        provider: ContractProvider,
+        via: Sender,
+        opts: UpgradeOptions & { value: bigint; queryId?: bigint },
+    ) {
+        await provider.internal(via, {
+            value: opts.value,
+            sendMode: SendMode.PAY_GAS_SEPARATELY,
+            body: upgradeCodeBody(opts, opts.queryId ?? 0n),
         })
     }
 

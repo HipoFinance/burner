@@ -1,4 +1,4 @@
-import { beginCell, toNano } from '@ton/core'
+import { beginCell, internal, toNano } from '@ton/core'
 import { flattenTransaction } from '@ton/test-utils'
 
 import { budget } from '../wrappers/Burner'
@@ -172,6 +172,72 @@ describe('Burner', () => {
             const balance = (await f.blockchain.getContract(f.burner.address)).balance
             expect(balance).toBeGreaterThan(0n)
             expect(balance).toBeLessThan(budget.reserve + budget.minDeposit)
+        })
+
+        // The mainnet burst of 2026-09-09: the treasury recovered three loans in one block and
+        // sent three fees in one transaction. All three staked, but only the first swap was
+        // funded -- the other two parked their hGRAM in hgram_pending, where it sat until a poke.
+        // Sending them one at a time cannot catch this, because each cycle finishes before the
+        // next payment is sent; they have to be in flight together.
+        it('runs every cycle when several payments land in the same block', async () => {
+            const f: Fixture = await setup()
+            const hpoBefore = await f.hpoSupply()
+
+            const body = beginCell()
+                .storeUint(Op.takeBorrowerFee, 32)
+                .storeUint(0n, 64)
+                .endCell()
+            const result = await f.treasury.sendMessages(
+                [0, 1, 2].map(() =>
+                    internal({ to: f.burner.address, value: BORROWER_FEE, body, bounce: true }),
+                ),
+            )
+
+            expect(messagesTo(result, HIPO_TREASURY, Op.depositCoins)).toHaveLength(3)
+            expect(messagesTo(result, DEDUST_HGRAM_VAULT, Op.transferNotification)).toHaveLength(3)
+
+            const progress = await f.burner.getProgress()
+            expect(progress.depositCount).toBe(3)
+            expect(progress.swapCount).toBe(3)
+            expect(progress.burnCount).toBe(3)
+            expect(progress.hgramPending).toBe(0n)
+            expect(progress.hpoPending).toBe(0n)
+            expect(await f.hgramBalance(f.burner.address)).toBe(0n)
+            expect(await f.hpoSupply()).toBeLessThan(hpoBefore)
+        })
+
+        // The forward is working capital, not a fee: it comes home and is staked by a later
+        // deposit, so it must never be counted as staked on the way out.
+        it('counts what Hipo staked, not the gas that rode along and came back', async () => {
+            const stakeRate = 860000000n
+            const f: Fixture = await setup({ stakeRate })
+            const before = await f.burner.getBurnerData()
+            const hgramBefore = await f.hgramSupply()
+            const balanceBefore = (await f.blockchain.getContract(f.burner.address)).balance
+
+            await f.burner.sendBorrowerFee(f.treasury.getSender(), BORROWER_FEE)
+
+            const after = await f.burner.getBurnerData()
+            const deposited = after.totalDeposited - before.totalDeposited
+
+            // total_deposited is what the treasury actually staked: the hGRAM the real parent
+            // minted is exactly that at the stake rate, with no forward gas folded in.
+            expect((await f.hgramSupply()) - hgramBefore).toBe((deposited * stakeRate) / 1000000000n)
+
+            // And it is a whole deposit_forward short of the balance the deposit swept.
+            const sweep = balanceBefore + BORROWER_FEE - budget.reserve
+            expect(deposited).toBe(sweep - budget.depositForward)
+        })
+
+        it('brings the swap gas home, so the balance is never left at the bare reserve', async () => {
+            const f: Fixture = await setup()
+            await f.burner.sendBorrowerFee(f.treasury.getSender(), BORROWER_FEE)
+
+            // The forward that the swap did not spend is sitting here as working capital for the
+            // next deposit to sweep. Without it the balance settles at the reserve and the next
+            // concurrent notification has nothing to spend.
+            const balance = (await f.blockchain.getContract(f.burner.address)).balance
+            expect(balance).toBeGreaterThan(budget.reserve)
         })
 
         it('runs a clean cycle for every payment', async () => {

@@ -107,3 +107,40 @@ export function jettonTransfer(
         bounce: true,
     })
 }
+
+/** Same op code and layout as the treasury's, so one upgrade procedure covers both contracts. */
+export const opUpgradeCode = 0x3d6a29b5
+
+export interface UpgradeOptions {
+    newCode: Cell
+    /**
+     * A one-off storage migration, blessed and run once inside the upgrade transaction.
+     *
+     * Absent is the only way to say "no migration" -- an empty cell is not a second way, and would
+     * be run and throw. Leave it undefined for an upgrade that does not change the layout.
+     */
+    migrateCode?: Cell
+    /** Where the leftover gas goes. */
+    returnExcess: Address
+}
+
+/**
+ * upgrade_code#3d6a29b5 query_id:uint64 new_code:^Cell migrate_code:(Maybe ^Cell)
+ *   return_excess:MsgAddr
+ *
+ * This is a body, not a complete message: unlike the rescue-hatch builders above it is sent to the
+ * burner rather than handed to send_raw_message.
+ */
+export function upgradeCodeBody(opts: UpgradeOptions, queryId = 0n): Cell {
+    const builder = beginCell()
+        .storeUint(opUpgradeCode, 32)
+        .storeUint(queryId, 64)
+        .storeRef(opts.newCode)
+
+    if (opts.migrateCode === undefined) {
+        builder.storeUint(0, 1)
+    } else {
+        builder.storeUint(1, 1).storeRef(opts.migrateCode)
+    }
+    return builder.storeAddress(opts.returnExcess).endCell()
+}

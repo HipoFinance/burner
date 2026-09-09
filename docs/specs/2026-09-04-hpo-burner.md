@@ -32,8 +32,8 @@ HPO is a Notcoin-fork jetton, so `op::burn` from the wallet owner genuinely redu
 Two parameters of this contract look surprising and are deliberate:
 
 - It routes through the **HPO/hGRAM** pair on DeDust rather than an HPO/GRAM pair.
-- It has **no per-swap cap and no minimum output**: the whole balance above the reserve goes in
-  every time.
+- It has **no per-swap cap and no minimum output**: the whole balance above the reserve, less the
+  gas held back to bring the cycle home, goes in every time.
 
 Both are protocol-level decisions about where HPO liquidity should sit and how the fee should
 reach it, not properties of the mechanism. They are recorded separately and are not parameters
@@ -100,6 +100,51 @@ tool for anyone.
 `budget::reserve` is 1 GRAM rather than a storage-rent figure, because it has to fund the swap
 and burn legs of a cycle that is *already in flight*, after the GRAM has left.
 
+### Each cycle carries its own gas
+
+*Added 2026-09-09, after the mainnet burst described below.*
+
+The reserve is a single pot, and `try_deposit` sweeps the balance down to exactly
+`budget::reserve` every time, so there is never headroom above it. That is fine for one payment
+at a time and wrong for several at once. On 2026-09-09 the treasury recovered three loans in one
+block and sent three fees in one transaction. All three staked. Then the first mint notification
+came back, passed the `balance < budget::reserve` guard in `try_swap`, and spent
+`budget::swap_gas` on its swap; the second and third notifications found the balance below the
+reserve, parked their hGRAM in `hgram_pending` and stopped. 20.86 hGRAM sat unswapped until the
+next payment. Nothing was lost — the design self-heals — but two thirds of that block's burn was
+deferred by a day.
+
+Raising the reserve does not fix it, because the guard compares against the reserve and the
+deposit sweeps back down to it: the headroom is gone before the notifications arrive, whatever
+the figure. The fix is to take the shared pot off the path entirely.
+
+`try_deposit` now names an explicit `coins` — `available - budget::deposit_forward` — instead of
+asking Hipo to stake the maximum. Hipo forwards everything it does not stake: the treasury does
+`raw_reserve(coins, reserve::add_original_balance)` and sends on with `send::unreserved_balance`,
+the parent relays with `send::remaining_value`, and our hGRAM wallet passes on everything above
+its storage fee with `send::unreserved_balance`. So the held-back 0.5 GRAM arrives as the *value
+of the mint notification that starts the swap*, about 0.002 GRAM lighter for the three hops. Each
+cycle funds its own leg 2, and the number of payments in flight stops mattering.
+
+Leg 3 already worked this way: the HPO notification arrives carrying what DeDust did not spend of
+`budget::swap_forward`, around 0.247 GRAM, against a 0.1 GRAM burn.
+
+The forward is working capital, not a cost. What the swap does not spend stays in the balance and
+is swept into the next deposit, so `total_deposited` records the stake and not the forward —
+counting the forward on the way out would count it again on the way back in.
+
+The price of naming an explicit `coins` is that the contract now has to stay ahead of Hipo's
+deposit fee instead of letting the treasury subtract it: `deposit_coins` throws
+`err::insufficient_fee` unless `coins <= incoming - fee`. That fee was 0.0088 GRAM when this was
+written, so `budget::deposit_forward` at 0.5 GRAM is a ~50x margin, and `budget::min_deposit` was
+raised to 2 GRAM so that the stake is never smaller than the gas riding with it.
+
+This is exact on the instant-mint path, which is the one the treasury runs. With `instant_mint?`
+off the deposit goes through a bill and the notification does not arrive until the round settles;
+the surplus still travels (`mint_bill` and `bill_burned` both forward their unreserved balance)
+but the timing changes, and the fallback is the one that runs today — a leg waits for the next
+payment.
+
 ### The route guard, and the cascade it prevents
 
 **This is the subtle part, and the test suite caught both halves of it as real bugs.**
@@ -139,9 +184,11 @@ designed out instead.
 
 **What the owner cannot do** is as important as what it can. The pool, the vault, the treasury
 and both masters are compile-time constants, and the only op the contract ever sends towards HPO
-is `op::burn`. There is no `set_code`. So the owner can take assets out of the contract, but
-cannot make the contract itself buy somewhere else, send HPO anywhere, or become a different
-program. Both halves are pinned by tests.
+is `op::burn`. So the owner can take assets out of the contract, but cannot make the contract
+itself buy somewhere else or send HPO anywhere. Both halves are pinned by tests.
+
+The third half of that sentence used to be "and cannot become a different program". That is no
+longer true; see *Upgradability* below.
 
 `op::reset_pending` exists because otherwise a withdrawal does not finish the job: pulling stuck
 hGRAM out leaves `hgram_pending` claiming it is still there, and every later payment would retry
@@ -152,6 +199,61 @@ Ownership transfer is **two-step** — the owner nominates, the nominee claims �
 jetton's own `change_admin`/`claim_admin`. A mistyped address therefore cannot silently destroy
 the hatch, which for a rescue mechanism is the failure that matters most.
 
+### Upgradability
+
+*Added 2026-09-09, reversing the decision above.*
+
+The contract shipped with no `set_code`, and immutability was named here as one of the three
+things the owner must never gain. That is reversed, deliberately, for one reason: **the address is
+the identity.** It is referenced from the DefiLlama adapters and from anything else that tracks
+the burn, and a mechanism that must be redeployed in order to be improved turns every one of those
+references into a moving target — the first redeploy, two days in, already forced one adapter to
+follow two addresses for a contract that had only ever run for two days. One more deployment buys
+a permanent address.
+
+Be exact about what this costs, because "the owner can now change the code" sounds worse and is
+subtler than it is:
+
+- It grants **no new power over what is here today.** `op::withdraw` already sends arbitrary
+  messages, so the owner could already move every asset out, HPO included. Anyone who trusted the
+  contract yesterday was already trusting the owner with its entire balance.
+- It grants power over **what arrives tomorrow.** The code that decides where a borrower fee goes
+  can be replaced, with no further visible act, and a reader of this source can no longer conclude
+  from the source alone what a future fee will do. That is a real loss and it is the reason this
+  section exists rather than a line in a changelog.
+
+`op::drop_ownership` remains the answer, and it now answers for more than it did: dropping
+ownership closes the rescue hatch and freezes the code in the same one-way step. The end state is
+unchanged — a contract nobody can reach into — and the path there is the same one it always was.
+
+**The mechanism is the treasury's**, deliberately: the same op code (`0x3d6a29b5`), the same
+message shape, and the same migrator contract, so one upgrade procedure covers both contracts.
+`upgrade_code` installs the new code, calls `set_c3`, and then calls `upgrade_data` — which
+dispatches into the code just installed, so a version validates its own arrival. In order:
+
+1. the migration carried by the message runs, if there is one;
+2. the **new** `load_data()` parses what it produced;
+3. the owner check runs against the value that parse yielded;
+4. `throw(0)` commits.
+
+Everything before step 4 is uncommitted, so an upgrade whose code cannot read this storage, whose
+migration produces something the new code misreads, or that would leave nobody able to reach the
+contract, reverts whole — old code, old data, still burning. `tests/Upgrade.spec.ts` covers each
+of those.
+
+That ordering is not decorative. `recv_internal` calls `load_data()` before it dispatches, so a
+burner whose storage does not parse could not receive another `upgrade_code` either; committing a
+bad migration is the one unrecoverable failure available here, and steps 2 and 3 are what stand in
+front of it. The same reasoning is why a migrator must contain no `commit()` and no `set_code()`,
+and must compile to exactly method ids 0 and `0x6d67` — all three are checked mechanically in
+`tests/Upgrade.spec.ts` rather than left to review.
+
+`scripts/upgradeBurner.ts` reads the burner's real code and storage off the network, replays the
+whole upgrade in a sandbox, and prints a field-level diff before asking for anything. The diff
+includes the **route**, which is compile-time and so would never show up in a storage comparison —
+repointing the burn is the most consequential thing an upgrade here can do, and it should be a
+line an operator reads rather than something to catch in a code review.
+
 ### The cost, and the way out of it
 
 While an owner exists, the burn is **trusted rather than mechanical**. Anyone auditing HPO's
@@ -159,8 +261,8 @@ tokenomics sees a contract whose owner can withdraw everything, and "burned" bec
 relied upon to burn". For a mechanism whose whole purpose is a credible supply link, that is a
 genuine cost, not a theoretical one.
 
-`op::drop_ownership` is the answer. It is one way, clears the pending nomination too, and leaves
-the burn cycle working exactly as before — so the contract can run with a hatch while the route
+`op::drop_ownership` is the answer. It is one way, clears the pending nomination too, freezes the
+code along with the hatch, and leaves the burn cycle working exactly as before — so the contract can run with a hatch while the route
 is unproven and be made permanently immutable later, by choice, without a redeploy or a treasury
 upgrade. The credibility is recoverable; the stranded funds would not have been.
 
@@ -190,6 +292,10 @@ Because that send is non-bounceable with `ignore_errors`, nothing this contract 
 total_swapped, total_burned)`. `total_burned` is asserted in the tests against the HPO master's
 actual `total_supply` drop, so the counter cannot silently drift; a leg that bounces rolls its
 counters back.
+
+`total_deposited` is what Hipo staked, which is a whole `budget::deposit_forward` short of what
+each deposit message carried; the difference is gas that comes back and is staked by a later
+deposit, so counting it on the way out would count it twice.
 
 `get_progress()` returns the pending amounts and the per-leg counts — a pending amount that does
 not clear is the signal that a leg is stuck and a poke is needed. `get_depositable()`

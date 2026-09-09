@@ -1,0 +1,63 @@
+;; A migrator that changes a value without changing the layout, for the upgrade tests only.
+;;
+;; This is the case that motivates "absent is the only way to say no migration" in upgrade_data: the
+;; storage it writes parses perfectly well under both the old and the new code, so a migrator that
+;; was silently dropped would still report success. Only the marked value shows whether it ran.
+;;
+;; It obeys the three migrator rules, and tests/Upgrade.spec.ts checks them mechanically:
+;; everything is inlined into the entry point, and there is no commit() and no set_code().
+
+#include "../../imports/stdlib.fc";
+
+;; What the migration writes over total_received, so a test can tell "it ran" from "it was dropped".
+const int marker = 424242424242;
+
+() migrate() impure method_id(0x6d67) {
+    slice ds = get_data().begin_parse();
+    slice hgram_wallet = ds~load_msg_addr();
+    slice hpo_wallet = ds~load_msg_addr();
+    cell ownership = ds~load_ref();
+    slice cs = ds~load_ref().begin_parse();
+    ds.end_parse();
+
+    cs~load_coins(); ;; total_received, replaced by the marker below
+    int total_deposited = cs~load_coins();
+    int total_swapped = cs~load_coins();
+    int total_burned = cs~load_coins();
+    int hgram_pending = cs~load_coins();
+    int hpo_pending = cs~load_coins();
+    int deposit_count = cs~load_uint(32);
+    int swap_count = cs~load_uint(32);
+    int burn_count = cs~load_uint(32);
+    int query_id = cs~load_uint(64);
+    ;; The re-run guard: against storage that already carries a changed layout this would leave bits
+    ;; over and throw, reverting the upgrade rather than corrupting it.
+    cs.end_parse();
+
+    begin_cell()
+        .store_slice(hgram_wallet)
+        .store_slice(hpo_wallet)
+        .store_ref(ownership)
+        .store_ref(
+            begin_cell()
+                .store_coins(marker)
+                .store_coins(total_deposited)
+                .store_coins(total_swapped)
+                .store_coins(total_burned)
+                .store_coins(hgram_pending)
+                .store_coins(hpo_pending)
+                .store_uint(deposit_count, 32)
+                .store_uint(swap_count, 32)
+                .store_uint(burn_count, 32)
+                .store_uint(query_id, 64)
+                .end_cell()
+        )
+        .end_cell()
+        .set_data();
+}
+
+;; A migrator is never deployed and never receives a message. This exists only because a compiled
+;; contract needs an entry point, and it is the other half of the two-method-id rule.
+() recv_internal(cell in_msg_full, slice in_msg_body) impure {
+    throw(0xffff);
+}

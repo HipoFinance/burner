@@ -25,6 +25,11 @@
 ;;   message that arrived, so a leg that fails or returns change self-heals -- the next trigger
 ;;   picks up whatever is sitting here.
 ;;
+;;   Each cycle carries its own gas. The deposit holds back budget::deposit_forward, which Hipo
+;;   forwards back as the value of the mint notification and which pays for that cycle's swap.
+;;   Without it, several payments landing in one block would all deposit but only the first would
+;;   swap, because they would be competing for one shared reserve; see try_deposit.
+;;
 ;;   There is no swap cap and no slippage limit. How much to trade and where is a protocol
 ;;   decision about HPO liquidity, fixed at deployment rather than exposed as a parameter.
 
@@ -163,20 +168,35 @@ int ready?() inline {
 ;; Leg 1 -- stake the GRAM
 ;; ---------------------------------------------------------------------------------------------
 
-;; Deposit everything above the reserve.
+;; Deposit everything above the reserve, less the gas this cycle will need on the way home.
 ;;
 ;; The amount comes from the balance rather than from the message that triggered this, so change
 ;; returned by an earlier cycle, a donation, and a payment that landed while discovery was still
 ;; running are all picked up together.
 ;;
-;; coins is sent as 0, which Hipo reads as "stake the maximum this message can pay for" -- the
-;; treasury subtracts its own fee and stakes the rest. That avoids having to know the fee, which
-;; is dynamic and cannot be read synchronously from here.
+;; The whole `available` is sent, but Hipo is told to stake only `stake`. The difference,
+;; budget::deposit_forward, is not spent: the treasury forwards everything it does not stake, the
+;; parent relays it, and our hGRAM wallet hands it on as the value of the mint notification. So it
+;; comes back as the gas that pays for this cycle's own swap.
+;;
+;; That is what makes concurrent payments work. Spending is balance-driven and try_deposit sweeps
+;; the balance down to exactly budget::reserve, so the reserve is a single pot with no headroom
+;; above it: when several payments land in one block, the first mint notification spends the
+;; reserve on its swap and every later one finds the balance below budget::reserve, parks its
+;; hGRAM in hgram_pending and waits for a poke. Making each cycle bring its own gas removes the
+;; shared pot from the path entirely, and it scales to any number of payments at once.
+;;
+;; The cost of naming an explicit `coins` is that we now have to stay ahead of Hipo's deposit fee
+;; rather than letting the treasury subtract it for us -- deposit_coins throws
+;; err::insufficient_fee if `coins` exceeds what the message can pay for. budget::deposit_forward
+;; is that margin, and it is about 50x the live fee; see its derivation in constants.fc.
 () try_deposit() impure inline {
     int available = get_balance().pair_first() - budget::reserve;
     if available < budget::min_deposit {
         return ();
     }
+    ;; Positive because budget::min_deposit is above budget::deposit_forward by construction.
+    int stake = available - budget::deposit_forward;
 
     query_id += 1;
     ;; deposit_coins#3d3761a6 query_id:uint64 owner:MsgAddr coins:Coins
@@ -184,10 +204,10 @@ int ready?() inline {
     builder body = begin_cell()
         .store_uint(op::deposit_coins, 32)
         .store_uint(query_id, 64)
-        .store_uint(0, 2)   ;; owner addr_none, which Hipo reads as the sender: us
-        .store_coins(0)     ;; stake the maximum
-        .store_coins(0)     ;; no bill ownership assignment; instant_mint is on
-        .store_uint(0, 2);  ;; no referrer
+        .store_uint(0, 2)      ;; owner addr_none, which Hipo reads as the sender: us
+        .store_coins(stake)    ;; the rest of `available` rides back as the notification's value
+        .store_coins(0)        ;; no bill ownership assignment; instant_mint is on
+        .store_uint(0, 2);     ;; no referrer
 
     ;; Bounceable: if the treasury refuses -- halted, or the amount too small to mint a token --
     ;; the GRAM must come back rather than vanish, and the next trigger will retry it.
@@ -196,9 +216,11 @@ int ready?() inline {
         send::pay_gas_separately + send::ignore_errors
     );
 
-    total_deposited += available;
+    ;; What Hipo stakes, not what the message carried: the forward is working capital that comes
+    ;; back and is swept into a later deposit, and counting it here would count it twice.
+    total_deposited += stake;
     deposit_count += 1;
-    emit_log(log::deposit, begin_cell().store_uint(query_id, 64).store_coins(available));
+    emit_log(log::deposit, begin_cell().store_uint(query_id, 64).store_coins(stake));
 }
 
 
@@ -345,6 +367,108 @@ int is_owner?(slice src) inline {
 
 
 ;; ---------------------------------------------------------------------------------------------
+;; Upgrades
+;; ---------------------------------------------------------------------------------------------
+;;
+;; This contract was immutable in its first deployment, and that was the better design. It is
+;; upgradable now for one reason: the address is the identity. It is referenced from the DefiLlama
+;; adapters and from anything else that tracks the burn, and a mechanism that has to be redeployed
+;; to be improved makes every one of those references a moving target. One more deployment buys a
+;; permanent address.
+;;
+;; Be clear about the cost. The owner could already move every asset out through op::withdraw, so
+;; this grants no new power over what is here today. What it grants is power over what arrives
+;; *tomorrow*: the code that decides where a borrower fee goes can now be replaced, without any
+;; further visible act, and a reader of this source can no longer conclude from the source alone
+;; what a future fee will do. The burn is trusted until ownership is dropped, and this widens what
+;; that trust covers.
+;;
+;; op::drop_ownership remains the answer, and it is now the answer to more than it was: dropping
+;; ownership closes the rescue hatch and freezes the code in the same one-way step. Nothing else
+;; reaches set_code -- op::withdraw hands its payload to send_raw_message and cannot install code,
+;; and there is a test that pins that.
+;;
+;; The mechanism is the treasury's, deliberately: same op code, same message shape, same migrator
+;; contract. See docs/specs/2026-09-04-hpo-burner.md and ../contract/scripts/upgrade_treasury.md.
+
+;; Run a one-off storage migration carried by the upgrade message. The cell is blessed into a
+;; continuation and entered at method id 0x6d67 ("mg"), so it runs once, inside this transaction,
+;; and is never stored as anyone's code.
+;;
+;; A migrator MUST NOT contain COMMIT or SETCODE, and MUST compile to exactly method ids 0 and
+;; 0x6d67:
+;;   - COMMIT locks in c4 and the set_code action already queued, which makes every check below
+;;     decorative. A migrator that commits and then writes an unparseable cell leaves the burner on
+;;     the new code with storage load_data() cannot read -- and recv_internal loads data before it
+;;     dispatches, so no further upgrade_code could ever be received. That is unrecoverable.
+;;   - SETCODE is appended after the one queued here, and the last action wins, so a migrator could
+;;     install code the upgrade message never named.
+;;   - EXECUTE does not set c3, which still holds this contract's code, so a non-inlined function
+;;     in a migrator compiles to CALLDICT and dispatches into the BURNER's method dictionary. Being
+;;     fully inlined is what keeps a migrator out of that trap.
+;; A migrator that does none of those cannot do lasting damage: any failure exits non-zero, c4 and
+;; c5 are discarded, and the burner stays on its old code with its old data.
+() run_migrator(cell migrate_code) impure asm "CTOS BLESS 0x6d67 PUSHINT SWAP EXECUTE";
+
+;; Reached by CALLDICT after set_c3, so this dispatches into the NEW code's dictionary -- the
+;; version being installed validates its own arrival. What runs here is therefore whatever the new
+;; code says, and it is no more powerful than that code already is.
+;;
+;; The order matters and is the whole safety argument. The migration runs first, then the new
+;; load_data() parses what it produced, then the owner check runs against the value that parse
+;; yielded. So an upgrade whose code cannot read this contract's storage, or whose migration
+;; produces something the new code misreads, or that loses the owner, throws here -- and because
+;; nothing has been committed, the set_code action and every storage write are discarded and the
+;; burner carries on as it was.
+() upgrade_data(slice src, int query_id, cell migrate_code, slice return_excess) impure method_id {
+    ;; The migration rides in on the message rather than being written here, so a released build
+    ;; carries no one-off logic and its code hash stays the hash of the plain contract.
+    ;;
+    ;; Absent is the only way to say "no migration". Anything present is run, and anything that is
+    ;; not a migrator throws and reverts the upgrade. Accepting an empty cell as a second way to
+    ;; mean nothing would let a value-only migration -- one that changes numbers without changing
+    ;; the layout -- be dropped silently and still report success, because the load_data() below
+    ;; would parse the unmigrated cell perfectly well.
+    ifnot cell_null?(migrate_code) {
+        run_migrator(migrate_code);
+    }
+
+    ;; Do not change the following code.
+    owner = null();
+    load_data();
+
+    ;; Re-checked against the owner the new code parsed, not the one the old code held. An upgrade
+    ;; that would land on storage where the owner is gone or unreadable fails here instead of
+    ;; leaving an unreachable contract behind.
+    throw_unless(err::access_denied, is_owner?(src));
+
+    emit_log(log::upgrade, begin_cell().store_uint(query_id, 64).store_slice(src));
+
+    builder excess = begin_cell()
+        .store_uint(op::gas_excess, 32)
+        .store_uint(query_id, 64);
+    send_msg(false, return_excess.to_builder(), excess, 0, send::remaining_value + send::ignore_errors);
+
+    ;; Exit code 0 is success, so c4 and the queued actions commit. Returning normally instead
+    ;; would fall back into recv_internal's owner branch and save_data() the OLD globals over
+    ;; whatever the migration just wrote.
+    throw(0);
+}
+
+;; Never returns.
+() upgrade_code(slice src, int query_id, slice s) impure inline {
+    cell new_code = s~load_ref();
+    cell migrate_code = s~load_maybe_ref();
+    slice return_excess = s~load_msg_addr();
+    s.end_parse();
+
+    set_code(new_code);
+    set_c3(new_code.begin_parse().bless());
+    upgrade_data(src, query_id, migrate_code, return_excess);
+}
+
+
+;; ---------------------------------------------------------------------------------------------
 ;; Entry point
 ;; ---------------------------------------------------------------------------------------------
 
@@ -429,7 +553,7 @@ int is_owner?(slice src) inline {
     ;; sending one of these throws rather than being treated as a donor, so the mistake bounces
     ;; and the sender keeps their money.
     if (op == op::withdraw) | (op == op::reset_pending) | (op == op::transfer_ownership)
-        | (op == op::claim_ownership) | (op == op::drop_ownership) {
+        | (op == op::claim_ownership) | (op == op::drop_ownership) | (op == op::upgrade_code) {
 
         if op == op::claim_ownership {
             ;; The second half of the two-step transfer. Only the nominated address can complete
@@ -442,7 +566,13 @@ int is_owner?(slice src) inline {
         }
 
         throw_unless(err::access_denied, is_owner?(src));
-        s~load_uint(64); ;; query_id
+        int query_id_in = s~load_uint(64);
+
+        if op == op::upgrade_code {
+            ;; Never returns: it commits from inside the new code, so control does not reach the
+            ;; save_data() below with these globals.
+            upgrade_code(src, query_id_in, s);
+        }
 
         if op == op::withdraw {
             withdraw(s);

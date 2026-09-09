@@ -98,6 +98,12 @@ const int op::transfer_ownership = 0x2f0b7d64;
 const int op::claim_ownership = 0x6d1e4c09;
 const int op::drop_ownership = 0x4b8a2f17;
 
+;; Deliberately the same op code and message shape as the treasury's, so an operator upgrades this
+;; contract with the procedure and the message layout they already know:
+;;   upgrade_code#3d6a29b5 query_id:uint64 new_code:^Cell migrate_code:(Maybe ^Cell)
+;;     return_excess:MsgAddr
+const int op::upgrade_code = 0x3d6a29b5;
+
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Errors
@@ -111,10 +117,16 @@ const int err::no_owner = 201;
 ;; Sizing
 ;; ---------------------------------------------------------------------------------------------
 
-;; Held back from every deposit. Unlike a single-leg burner this must fund a whole cycle that is
-;; already in flight -- the swap leg and then the burn leg both draw on it after the GRAM has
-;; already left -- so it is sized at swap_gas + burn_gas plus margin and storage, not at storage
-;; alone. Returned excesses from all three legs top it back up.
+;; Held back from every deposit. Each cycle now carries its own swap gas home in
+;; budget::deposit_forward, so this is a floor rather than the thing that funds the next leg: it
+;; keeps storage paid, funds a rediscovery, and covers a cycle whose forward gas went missing.
+;; Still sized at swap_gas + burn_gas plus margin, because that is what a cycle costs when it has
+;; to fall back on this. Returned excesses from all three legs top it back up.
+;;
+;; Note what it cannot do: it is a single pot, and try_deposit sweeps the balance down to exactly
+;; this figure, so there is never headroom above it. That is why it can only ever fund one leg per
+;; burst of triggers, and why budget::deposit_forward rather than a larger reserve is the answer
+;; to concurrent payments.
 const int budget::reserve = 1000000000; ;; 1 GRAM
 
 ;; Attached to send_tokens for the swap leg. Hipo's wallet requires
@@ -132,12 +144,34 @@ const int budget::burn_gas = 100000000; ;; 0.1 GRAM
 ;; send::remaining_value, so most of this comes straight back.
 const int budget::discovery_gas = 50000000; ;; 0.05 GRAM
 
+;; Sent along with every deposit on top of what is actually staked, so that it rides back here as
+;; the value of the mint notification and pays for that cycle's own swap.
+;;
+;; This is the whole reason try_deposit names an explicit `coins` instead of asking Hipo to stake
+;; the maximum. The treasury reserves `coins` and forwards the rest (raw_reserve with
+;; reserve::add_original_balance, then send::unreserved_balance), the parent relays it on with
+;; send::remaining_value, and the wallet passes on everything above its storage fee with
+;; send::unreserved_balance. So the surplus arrives intact, minus about 0.002 GRAM of gas over the
+;; three hops.
+;;
+;; Sized at swap_gas plus a quarter of it as margin. It is working capital, not a cost: whatever
+;; the swap does not spend sits in the balance and is swept into the next deposit.
+;;
+;; The one thing to keep true if this changes: it must stay comfortably above the treasury's own
+;; deposit fee, which is about 0.0088 GRAM. deposit_coins throws err::insufficient_fee unless
+;; `coins <= incoming - that fee`, and since we ask for `available - deposit_forward`, this is the
+;; margin. At 0.5 GRAM it is roughly 50x, so a gas-price rise cannot turn deposits into bounces.
+const int budget::deposit_forward = 500000000; ;; 0.5 GRAM
+
 ;; Smallest deposit worth making. There is deliberately no maximum: the whole balance above the
 ;; reserve is deposited and burned every time. This floor is a dust guard, not a slippage
 ;; control -- it exists so that returned change and stray small amounts cannot spend more in gas
-;; than they are worth. The treasury's own deposit fee is about 0.0088 GRAM, so 1 GRAM is a wide
-;; margin over the point where a deposit stops paying for itself.
-const int budget::min_deposit = 1000000000; ;; 1 GRAM
+;; than they are worth.
+;;
+;; It must exceed budget::deposit_forward, or try_deposit would compute a non-positive stake; the
+;; figure is that forward plus 1 GRAM of actual stake, which is itself a wide margin over the
+;; treasury's 0.0088 GRAM deposit fee.
+const int budget::min_deposit = 2000000000; ;; 2 GRAM
 
 
 ;; ---------------------------------------------------------------------------------------------
@@ -149,6 +183,7 @@ const int log::deposit = 0x2;
 const int log::swap = 0x3;
 const int log::burn = 0x4;
 const int log::discovery = 0x5;
+const int log::upgrade = 0x6;
 
 
 ;; ---------------------------------------------------------------------------------------------
@@ -163,4 +198,5 @@ const int send::regular = 0;
 const int send::pay_gas_separately = 1;
 const int send::ignore_errors = 2;
 const int send::bounce_on_action_fail = 16;
+const int send::remaining_value = 64;
 const int send::unreserved_balance = 128;

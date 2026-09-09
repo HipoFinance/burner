@@ -344,7 +344,12 @@ describe('Ownership', () => {
             expect(toHpoWallet.length).toBeGreaterThan(0)
         })
 
-        it('cannot change the code', async () => {
+        // The burner became upgradable on 2026-09-09, so "the owner cannot change the code" is no
+        // longer true of the contract. It is still true of the rescue hatch, and that is worth
+        // keeping pinned: op::withdraw hands its payload to send_raw_message, which cannot install
+        // code, so changing the code stays something an operator has to ask for by name with
+        // op::upgrade_code -- and tests/Upgrade.spec.ts covers what that may and may not do.
+        it('cannot change the code: only op::upgrade_code reaches set_code', async () => {
             const f: Fixture = await setup()
             const codeOf = async () => {
                 const st = (await f.blockchain.getContract(f.burner.address)).account.account?.storage.state

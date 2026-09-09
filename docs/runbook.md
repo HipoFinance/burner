@@ -116,9 +116,56 @@ ownership abandons them. It also asks you to type the burner address to confirm.
 
 The burn cycle keeps working exactly as before. Only the hatch goes away.
 
+## Upgrading the code
+
+`npx blueprint run upgradeBurner`
+
+The burner is upgradable so that its address never has to move again — it is referenced from the
+DefiLlama adapters and anything else that tracks the burn. The op code and message shape are the
+treasury's, so this is the procedure you already know.
+
+The script does the work that makes an upgrade hard to get wrong:
+
+1. It refuses locally if the connected wallet is not the owner.
+2. It compiles `Burner` from the working tree, so what you reviewed is what gets sent, and stops
+   if that is already the code on chain.
+3. It reads the burner's **actual** code and storage off the network and replays the whole upgrade
+   in a local sandbox, then prints a field-level diff. Read every line: anything there you did not
+   intend is a reason to stop. The diff includes the **route**, which is compile-time and would
+   never show up in a storage comparison — a repointed pool is the worst thing an upgrade here can
+   do, so it is a line to read rather than something to catch in review.
+4. If the upgrade would fail, it says so and sends nothing.
+5. For a migration, it prints the migrator source and demands its code hash typed back. A migrator
+   is code that runs with the burner's full authority and is *not* part of the reviewed code
+   release, so publish its hash alongside the code hash and have every signer read the source.
+6. It asks you to type the burner address before sending.
+
+**Does this upgrade need a migration?** Only if the storage layout changes, or if values need
+rewriting. Answer "no -- code only" otherwise. Absent is the only way to say "no migration": an
+empty cell is not a second way of saying it and would be run and throw.
+
+**Writing a migrator.** Put it in `contracts/mock/migrators/`, add a `wrappers/<Name>.compile.ts`,
+and add it to the rule checks in `tests/Upgrade.spec.ts`. Three rules, all checked mechanically
+there:
+
+- no `commit()` — it would lock in the queued `set_code` and make every check after the migration
+  decorative; a migrator that commits and then writes an unparseable cell is unrecoverable,
+  because `recv_internal` loads data before it dispatches and no further upgrade could arrive;
+- no `set_code()` — it is appended after the one already queued and the last action wins, so it
+  could install code the upgrade message never named;
+- fully inlined, so it compiles to exactly method ids 0 and `0x6d67`. `EXECUTE` does not set c3,
+  so a non-inlined function would `CALLDICT` into the *burner's* dictionary.
+
+**If it fails.** The upgrade reverts whole — old code, old data, still burning. The cost is a
+wasted fee. What the dry run cannot tell you is whether the new code is the code you meant.
+
 ## What no script can do
 
-The route is compiled in, and there is no `set_code`. The owner cannot point the burner at a
-different pool, cannot make it send HPO anywhere but a burn, and cannot change what it is. If the
-route needs to change, the answer is always: stop the flow at the treasury, recover what is here,
-deploy a new burner, and upgrade the treasury to name it.
+The route is compiled in. The owner cannot point a *running* burner at a different pool, cannot
+make it send HPO anywhere but a burn through `op::withdraw`, and cannot reach `set_code` by any
+path except `op::upgrade_code` by name. Changing the route now means an upgrade, reviewed as one,
+with the route change visible in the dry run's diff.
+
+After `dropOwnership` none of that is available either: the code is frozen along with the hatch,
+and the only way to change anything is to deploy a new burner and upgrade the treasury to name
+it.
