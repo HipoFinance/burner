@@ -26,9 +26,40 @@ constant.**
 | `transferOwnership` | Nominate a new owner (step 1 of 2). |
 | `claimOwnership` | Accept a nomination (step 2 of 2). |
 | `dropOwnership` | Give up the rescue hatch, permanently. |
+| `upgradeBurner` | Install new code, with a dry run against live state first. |
 
-Run any of them with `npx blueprint run <name>`. All need `blueprint.config.ts`, which is
-gitignored because it holds an API key.
+Run any of them with `npx blueprint run <name>` — the **name**, not a path. `blueprint run
+scripts/rescue.ts` fails with "Could not find file with name": blueprint globs `scripts/` itself
+and matches on the bare name. All of them need `blueprint.config.ts`, which is gitignored because
+it holds an API key.
+
+## Signing, when the owner is a multisig
+
+The owner should be a multisig, and then nothing on your machine can sign for it. `--deeplink` has
+no connected wallet either — blueprint's deeplink provider has no address to report.
+
+Both cases work the same way. Each script asks **which address will sign**, defaulting to the
+current owner, and uses that for its local checks so you still get told about a mistake before
+sending rather than after a bounce. Then, before every action, it prints the request:
+
+```
+  ---- request ------------------------------------------------------------
+  To       EQ...the burner
+  Value    0.3 GRAM  (300000000 nanoton)
+  Bounce   true
+  Body     te6cc...
+  Note     withdraw 20.856848318 hGRAM to EQ...
+  -------------------------------------------------------------------------
+```
+
+Those three fields are what a multisig proposal is built from. **Answering "no" to the send is a
+normal way to use these scripts**, not an abort: you get the request, the script moves on to the
+next step, and you still get walked through them in the right order — which for a rescue is the
+part that is easy to get wrong.
+
+The printed body comes from the same builder the send path uses, so it is the cell that would go
+on chain rather than a description of one. `tests/Ownership.spec.ts` drives a whole rescue from
+these bodies alone, sent raw the way a multisig sends them.
 
 ## First: is anything actually wrong?
 
@@ -55,6 +86,10 @@ they need opposite responses:
 
 This is the guided version and does the whole sequence in the right order. It checks whether the
 pool is genuinely dead first, and will talk you out of it if the route looks alive.
+
+**It stops early when there is nothing stuck.** If both jetton wallets are empty and the pool is
+alive, there is no rescue to do and it says so. To empty a burner you are retiring — where the
+only thing left is the GRAM balance — use `withdrawGram` and choose to sweep it all.
 
 The order matters, and it is the reason to prefer this over the individual scripts:
 

@@ -106,7 +106,12 @@ well above Hipo's deposit fee (~0.0088 GRAM) or `deposit_coins` starts bouncing 
   diffs the result. Same reasoning as `rescue.ts`: the tests drive it, so it is proven before the
   day it matters.
 - `wrappers/operate.ts` — shared script preamble. Owner scripts print state and refuse locally
-  before sending, so a mistake is a printed line and not a bounce to decode.
+  before sending, so a mistake is a printed line and not a bounce to decode. There may be **no
+  connected wallet** (`--deeplink`, or a multisig owner nothing here can sign for), so it asks who
+  will sign rather than aborting, and `printRequest` prints every action as the to/value/body a
+  multisig proposal is built from. The bodies come from the builders in `wrappers/Burner.ts` that
+  the send methods also use, so printed and sent cannot drift; tests drive a whole rescue from
+  those bodies alone.
 - `wrappers/addresses.ts` — the deployed burner and the mainnet addresses the scripts use, in one
   place so they cannot drift. The burner address is a constant, deliberately not derived: a
   derivation keys off initial state including the original owner, so it would go quietly wrong

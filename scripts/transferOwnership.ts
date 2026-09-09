@@ -1,7 +1,8 @@
 import { toNano } from '@ton/core'
 import { NetworkProvider } from '@ton/blueprint'
 
-import { beginOwnerAction, confirm } from '../wrappers/operate'
+import { transferOwnershipBody } from '../wrappers/Burner'
+import { beginOwnerAction, confirm, printRequest } from '../wrappers/operate'
 
 /**
  * Step one of two: nominate a new owner.
@@ -34,13 +35,17 @@ export async function run(provider: NetworkProvider) {
     }
     ui.write('')
 
+    const request = { value: toNano('0.05'), newOwner }
+    printRequest(provider, {
+        to: session.burner.address,
+        value: request.value,
+        body: transferOwnershipBody(request),
+        note: `nominate ${newOwner.toString()} as owner (they must then claim)`,
+    })
+
     if (!(await confirm(provider, 'Send the nomination?'))) {
         return
     }
-
-    await session.burner.sendTransferOwnership(provider.sender(), {
-        value: toNano('0.05'),
-        newOwner,
-    })
+    await session.burner.sendTransferOwnership(provider.sender(), request)
     ui.write('Sent. Confirm with: npx blueprint run showBurner')
 }

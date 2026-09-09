@@ -1,7 +1,8 @@
 import { toNano } from '@ton/core'
 import { NetworkProvider } from '@ton/blueprint'
 
-import { beginOwnerAction, confirm, gram, jettonBalance } from '../wrappers/operate'
+import { dropOwnershipBody } from '../wrappers/Burner'
+import { beginOwnerAction, confirm, gram, jettonBalance, printRequest } from '../wrappers/operate'
 
 /**
  * Give up the rescue hatch, permanently.
@@ -55,6 +56,13 @@ export async function run(provider: NetworkProvider) {
     ui.write('and no governance action that restores access. It also freezes the code: after this')
     ui.write('the burner can never be upgraded again, only replaced at a new address.')
     ui.write('')
+
+    printRequest(provider, {
+        to: session.burner.address,
+        value: toNano('0.05'),
+        body: dropOwnershipBody(),
+        note: 'IRREVERSIBLE: drop ownership, closing the rescue hatch and freezing the code',
+    })
 
     if (!(await confirm(provider, 'Permanently drop ownership?'))) {
         return

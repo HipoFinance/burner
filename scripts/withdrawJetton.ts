@@ -2,7 +2,8 @@ import { Address, SendMode, fromNano, toNano } from '@ton/core'
 import { NetworkProvider } from '@ton/blueprint'
 
 import { HGRAM, HPO } from '../wrappers/addresses'
-import { beginOwnerAction, confirm, jettonBalance, walletAddressOf } from '../wrappers/operate'
+import { withdrawBody } from '../wrappers/Burner'
+import { beginOwnerAction, confirm, printRequest, jettonBalance, walletAddressOf } from '../wrappers/operate'
 import { jettonTransfer } from '../wrappers/rescue'
 
 /**
@@ -69,12 +70,8 @@ export async function run(provider: NetworkProvider) {
         ui.write('within a block of arriving, so only do this if it is genuinely stuck.')
     }
     ui.write('')
-    if (!(await confirm(provider, 'Send it?'))) {
-        return
-    }
-
     // 0.2 GRAM covers the wallet's own fees; the remainder returns to the destination.
-    await session.burner.sendWithdraw(provider.sender(), {
+    const request = {
         value: toNano('0.3'),
         mode: SendMode.PAY_GAS_SEPARATELY,
         message: jettonTransfer(wallet, {
@@ -83,7 +80,18 @@ export async function run(provider: NetworkProvider) {
             amount,
             attached: toNano('0.2'),
         }),
+    }
+    printRequest(provider, {
+        to: session.burner.address,
+        value: request.value,
+        body: withdrawBody(request),
+        note: `withdraw ${fromNano(amount)} ${label} to ${destination.toString()}`,
     })
+
+    if (!(await confirm(provider, 'Send it?'))) {
+        return
+    }
+    await session.burner.sendWithdraw(provider.sender(), request)
 
     ui.write('Sent.')
     ui.write('')

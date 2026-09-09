@@ -1,7 +1,8 @@
 import { toNano } from '@ton/core'
 import { NetworkProvider } from '@ton/blueprint'
 
-import { beginOwnerAction, confirm } from '../wrappers/operate'
+import { claimOwnershipBody } from '../wrappers/Burner'
+import { beginOwnerAction, confirm, printRequest } from '../wrappers/operate'
 
 /**
  * Step two of two: take ownership you have been nominated for.
@@ -32,10 +33,16 @@ export async function run(provider: NetworkProvider) {
     ui.write(`Taking ownership from ${session.owner?.toString() ?? 'nobody'}.`)
     ui.write('')
 
+    printRequest(provider, {
+        to: session.burner.address,
+        value: toNano('0.05'),
+        body: claimOwnershipBody(),
+        note: 'claim ownership as the nominated address',
+    })
+
     if (!(await confirm(provider, 'Claim ownership?'))) {
         return
     }
-
     await session.burner.sendClaimOwnership(provider.sender(), toNano('0.05'))
     ui.write('Sent. Confirm with: npx blueprint run showBurner')
 }

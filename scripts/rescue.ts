@@ -2,7 +2,8 @@ import { SendMode, fromNano, toNano } from '@ton/core'
 import { NetworkProvider } from '@ton/blueprint'
 
 import { DEDUST_POOL } from '../wrappers/addresses'
-import { beginOwnerAction, confirm, gram, jettonBalance } from '../wrappers/operate'
+import { withdrawBody, resetPendingBody } from '../wrappers/Burner'
+import { beginOwnerAction, confirm, gram, jettonBalance, printRequest } from '../wrappers/operate'
 import { gramTransfer, jettonTransfer } from '../wrappers/rescue'
 
 /**
@@ -68,6 +69,12 @@ export async function run(provider: NetworkProvider) {
 
     const destination = await ui.inputAddress('Recover everything to', session.sender)
     ui.write('')
+    if (!session.connected) {
+        ui.write('No wallet is connected, so each step below prints its request and then asks.')
+        ui.write('Answer no to every send and take the printed requests to the multisig; the')
+        ui.write('script still walks you through them in the right order.')
+        ui.write('')
+    }
 
     // 2. Pull the jettons out.
     for (const [label, wallet, held] of [
@@ -81,17 +88,24 @@ export async function run(provider: NetworkProvider) {
         if (label === 'HPO') {
             ui.write('  (this takes HPO out rather than burning it -- only right if it is stuck)')
         }
+        const move = {
+            value: toNano('0.3'),
+            mode: SendMode.PAY_GAS_SEPARATELY,
+            message: jettonTransfer(wallet, {
+                to: destination,
+                responseTo: destination,
+                amount: held,
+                attached: toNano('0.2'),
+            }),
+        }
+        printRequest(provider, {
+            to: session.burner.address,
+            value: move.value,
+            body: withdrawBody(move),
+            note: `withdraw ${fromNano(held)} ${label} to ${destination.toString()}`,
+        })
         if (await confirm(provider, `Move the ${label}?`)) {
-            await session.burner.sendWithdraw(provider.sender(), {
-                value: toNano('0.3'),
-                mode: SendMode.PAY_GAS_SEPARATELY,
-                message: jettonTransfer(wallet, {
-                    to: destination,
-                    responseTo: destination,
-                    amount: held,
-                    attached: toNano('0.2'),
-                }),
-            })
+            await session.burner.sendWithdraw(provider.sender(), move)
             ui.write(`  sent. Wait for it to land before the next step.`)
         }
         ui.write('')
@@ -101,12 +115,15 @@ export async function run(provider: NetworkProvider) {
     ui.write('Step: reset the pending amounts to zero.')
     ui.write('  Without this the contract still believes those tokens are here, and every later')
     ui.write('  payment retries a leg that cannot succeed, spending gas each time.')
+    const reset = { value: toNano('0.05'), hgramPending: 0n, hpoPending: 0n }
+    printRequest(provider, {
+        to: session.burner.address,
+        value: reset.value,
+        body: resetPendingBody(reset),
+        note: 'set hgram_pending and hpo_pending to 0',
+    })
     if (await confirm(provider, 'Reset pending to zero?')) {
-        await session.burner.sendResetPending(provider.sender(), {
-            value: toNano('0.05'),
-            hgramPending: 0n,
-            hpoPending: 0n,
-        })
+        await session.burner.sendResetPending(provider.sender(), reset)
         ui.write('  sent.')
     }
     ui.write('')
@@ -120,12 +137,19 @@ export async function run(provider: NetworkProvider) {
     ui.write('  Remember to stop the flow at the source too: set the treasury\'s borrower_fee to 0,')
     ui.write('  which needs no upgrade, or payments will keep arriving here.')
     ui.write('')
+    const sweep = {
+        value: toNano('0.05'),
+        mode: SendMode.CARRY_ALL_REMAINING_BALANCE,
+        message: gramTransfer(destination, 0n),
+    }
+    printRequest(provider, {
+        to: session.burner.address,
+        value: sweep.value,
+        body: withdrawBody(sweep),
+        note: `send the entire GRAM balance to ${destination.toString()} and stop the contract`,
+    })
     if (await confirm(provider, 'Take the whole GRAM balance and stop the contract?')) {
-        await session.burner.sendWithdraw(provider.sender(), {
-            value: toNano('0.05'),
-            mode: SendMode.CARRY_ALL_REMAINING_BALANCE,
-            message: gramTransfer(destination, 0n),
-        })
+        await session.burner.sendWithdraw(provider.sender(), sweep)
         ui.write('  sent.')
     }
 

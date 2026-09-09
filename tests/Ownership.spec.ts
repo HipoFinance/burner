@@ -1,7 +1,7 @@
 import { Address, SendMode, toNano } from '@ton/core'
 import { flattenTransaction } from '@ton/test-utils'
 
-import { errAccessDenied } from '../wrappers/Burner'
+import { errAccessDenied, resetPendingBody, withdrawBody } from '../wrappers/Burner'
 import { mockMode } from '../wrappers/MockDedust'
 import { gramTransfer, jettonTransfer } from '../wrappers/rescue'
 import { DEDUST_HGRAM_VAULT, Fixture, HIPO_TREASURY, HPO_MASTER, Op, mintHpoMessage, setup } from './helper'
@@ -365,6 +365,70 @@ describe('Ownership', () => {
 
             expect(await codeOf()).toBe(before)
             expect(before).toBeDefined()
+        })
+    })
+
+    // The owner is expected to be a multisig, and then nothing on an operator's machine can sign
+    // for it: the scripts compute a request and print its body for a proposal to carry. So the
+    // body builders are the operator's real interface, and a body the contract would reject is a
+    // failed rescue. Sent here as a raw body, the way a multisig sends one.
+    describe('the message bodies the scripts print for a multisig', () => {
+        it('runs the whole rescue from printed bodies alone', async () => {
+            // DeDust swallows the swap, so hGRAM ends up in our wallet with no way to spend it --
+            // the case the hatch exists for, done the way a multisig would have to do it.
+            const f: Fixture = await setup({ mode: mockMode.refund })
+            await f.burner.sendBorrowerFee(f.treasury.getSender(), BORROWER_FEE)
+
+            const stranded = await f.hgramBalance(f.burner.address)
+            expect(stranded).toBeGreaterThan(0n)
+
+            await f.owner.send({
+                to: f.burner.address,
+                value: toNano('0.5'),
+                bounce: true,
+                body: withdrawBody({
+                    mode: SendMode.PAY_GAS_SEPARATELY,
+                    message: jettonTransfer(f.burnerHgramWallet, {
+                        to: f.owner.address,
+                        responseTo: f.owner.address,
+                        amount: stranded,
+                        attached: toNano('0.2'),
+                    }),
+                }),
+            })
+
+            expect(await f.hgramBalance(f.burner.address)).toBe(0n)
+            expect(await f.hgramBalance(f.owner.address)).toBe(stranded)
+
+            // The books still claim the hGRAM is here, so the second request squares them.
+            expect((await f.burner.getProgress()).hgramPending).toBeGreaterThan(0n)
+
+            await f.owner.send({
+                to: f.burner.address,
+                value: toNano('0.1'),
+                bounce: true,
+                body: resetPendingBody({ hgramPending: 0n, hpoPending: 0n }),
+            })
+
+            const progress = await f.burner.getProgress()
+            expect(progress.hgramPending).toBe(0n)
+            expect(progress.hpoPending).toBe(0n)
+        })
+
+        it('is still refused when anyone but the owner sends the same body', async () => {
+            const f: Fixture = await setup()
+            const result = await f.stranger.send({
+                to: f.burner.address,
+                value: toNano('0.05'),
+                bounce: true,
+                body: resetPendingBody({ hgramPending: 0n, hpoPending: 0n }),
+            })
+
+            expect(result.transactions).toHaveTransaction({
+                to: f.burner.address,
+                exitCode: errAccessDenied,
+                success: false,
+            })
         })
     })
 

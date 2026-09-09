@@ -1,7 +1,8 @@
 import { SendMode, fromNano, toNano } from '@ton/core'
 import { NetworkProvider } from '@ton/blueprint'
 
-import { beginOwnerAction, confirm, gram } from '../wrappers/operate'
+import { withdrawBody } from '../wrappers/Burner'
+import { beginOwnerAction, confirm, gram, printRequest } from '../wrappers/operate'
 import { gramTransfer } from '../wrappers/rescue'
 
 /**
@@ -63,17 +64,24 @@ export async function run(provider: NetworkProvider) {
 
     ui.write(`About to send ${describe}.`)
     ui.write('')
-    if (!(await confirm(provider, 'Send it?'))) {
-        return
-    }
-
-    await session.burner.sendWithdraw(provider.sender(), {
+    const request = {
         value: toNano('0.05'),
         mode:
             how === 'a specific amount'
                 ? SendMode.PAY_GAS_SEPARATELY
                 : SendMode.CARRY_ALL_REMAINING_BALANCE,
         message,
+    }
+    printRequest(provider, {
+        to: session.burner.address,
+        value: request.value,
+        body: withdrawBody(request),
+        note: how === 'a specific amount' ? 'withdraw a fixed amount of GRAM' : 'sweep the whole GRAM balance',
     })
+
+    if (!(await confirm(provider, 'Send it?'))) {
+        return
+    }
+    await session.burner.sendWithdraw(provider.sender(), request)
     ui.write('Sent. Confirm with: npx blueprint run showBurner')
 }

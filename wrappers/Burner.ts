@@ -50,6 +50,48 @@ export const budget = {
     minDeposit: 2n * depositForward,
 } as const
 
+/**
+ * Message bodies for the owner ops.
+ *
+ * Separated from the send methods so that a script can print the exact cell it is about to send --
+ * which is what a multisig proposal needs, and what a `--deeplink` run cannot get at otherwise.
+ * The send methods below build their bodies from these, so what is printed and what is sent cannot
+ * drift apart.
+ */
+export function withdrawBody(opts: { mode: number; message: Cell; queryId?: bigint }): Cell {
+    return beginCell()
+        .storeUint(opWithdraw, 32)
+        .storeUint(opts.queryId ?? 0n, 64)
+        .storeUint(opts.mode, 8)
+        .storeRef(opts.message)
+        .endCell()
+}
+
+export function resetPendingBody(opts: { hgramPending: bigint; hpoPending: bigint; queryId?: bigint }): Cell {
+    return beginCell()
+        .storeUint(opResetPending, 32)
+        .storeUint(opts.queryId ?? 0n, 64)
+        .storeCoins(opts.hgramPending)
+        .storeCoins(opts.hpoPending)
+        .endCell()
+}
+
+export function transferOwnershipBody(opts: { newOwner: Address; queryId?: bigint }): Cell {
+    return beginCell()
+        .storeUint(opTransferOwnership, 32)
+        .storeUint(opts.queryId ?? 0n, 64)
+        .storeAddress(opts.newOwner)
+        .endCell()
+}
+
+export function claimOwnershipBody(queryId = 0n): Cell {
+    return beginCell().storeUint(opClaimOwnership, 32).storeUint(queryId, 64).endCell()
+}
+
+export function dropOwnershipBody(queryId = 0n): Cell {
+    return beginCell().storeUint(opDropOwnership, 32).storeUint(queryId, 64).endCell()
+}
+
 export interface BurnerConfig {
     hgramWallet: Address | null
     hpoWallet: Address | null
@@ -216,12 +258,7 @@ export class Burner implements Contract {
         await provider.internal(via, {
             value: opts.value,
             sendMode: SendMode.PAY_GAS_SEPARATELY,
-            body: beginCell()
-                .storeUint(opWithdraw, 32)
-                .storeUint(opts.queryId ?? 0n, 64)
-                .storeUint(opts.mode, 8)
-                .storeRef(opts.message)
-                .endCell(),
+            body: withdrawBody(opts),
         })
     }
 
@@ -234,12 +271,7 @@ export class Burner implements Contract {
         await provider.internal(via, {
             value: opts.value,
             sendMode: SendMode.PAY_GAS_SEPARATELY,
-            body: beginCell()
-                .storeUint(opResetPending, 32)
-                .storeUint(opts.queryId ?? 0n, 64)
-                .storeCoins(opts.hgramPending)
-                .storeCoins(opts.hpoPending)
-                .endCell(),
+            body: resetPendingBody(opts),
         })
     }
 
@@ -251,11 +283,7 @@ export class Burner implements Contract {
         await provider.internal(via, {
             value: opts.value,
             sendMode: SendMode.PAY_GAS_SEPARATELY,
-            body: beginCell()
-                .storeUint(opTransferOwnership, 32)
-                .storeUint(opts.queryId ?? 0n, 64)
-                .storeAddress(opts.newOwner)
-                .endCell(),
+            body: transferOwnershipBody(opts),
         })
     }
 
@@ -263,7 +291,7 @@ export class Burner implements Contract {
         await provider.internal(via, {
             value,
             sendMode: SendMode.PAY_GAS_SEPARATELY,
-            body: beginCell().storeUint(opClaimOwnership, 32).storeUint(queryId, 64).endCell(),
+            body: claimOwnershipBody(queryId),
         })
     }
 
@@ -272,7 +300,7 @@ export class Burner implements Contract {
         await provider.internal(via, {
             value,
             sendMode: SendMode.PAY_GAS_SEPARATELY,
-            body: beginCell().storeUint(opDropOwnership, 32).storeUint(queryId, 64).endCell(),
+            body: dropOwnershipBody(queryId),
         })
     }
 

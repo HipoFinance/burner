@@ -1,7 +1,8 @@
 import { fromNano, toNano } from '@ton/core'
 import { NetworkProvider } from '@ton/blueprint'
 
-import { beginOwnerAction, confirm, jettonBalance } from '../wrappers/operate'
+import { resetPendingBody } from '../wrappers/Burner'
+import { beginOwnerAction, confirm, jettonBalance, printRequest } from '../wrappers/operate'
 
 /**
  * Square the contract's books with reality.
@@ -57,14 +58,17 @@ export async function run(provider: NetworkProvider) {
     ui.write('')
     ui.write(`About to set pending to ${fromNano(hgramPending)} hGRAM and ${fromNano(hpoPending)} HPO.`)
     ui.write('')
+    const request = { value: toNano('0.05'), hgramPending, hpoPending }
+    printRequest(provider, {
+        to: session.burner.address,
+        value: request.value,
+        body: resetPendingBody(request),
+        note: `set hgram_pending to ${fromNano(hgramPending)} and hpo_pending to ${fromNano(hpoPending)}`,
+    })
+
     if (!(await confirm(provider, 'Send it?'))) {
         return
     }
-
-    await session.burner.sendResetPending(provider.sender(), {
-        value: toNano('0.05'),
-        hgramPending,
-        hpoPending,
-    })
+    await session.burner.sendResetPending(provider.sender(), request)
     ui.write('Sent. Confirm with: npx blueprint run showBurner')
 }
