@@ -15,8 +15,13 @@ import { Address } from '@ton/core'
  * A derived address comes from the contract's *initial* state, which includes the original
  * owner -- so a derivation silently stops reproducing the right address the moment ownership
  * moves, which is exactly when an operator can least afford a wrong default.
+ *
+ * Deployed 2026-09-09, replacing EQAGPJMx...l6Jp, which ran for four days and is now empty and
+ * retired. That burner had no set_code, so the gas fix could not be delivered to it. This one is
+ * upgradable, which is the point: improvements no longer move the address, and nothing that
+ * tracks the burn -- the DefiLlama adapters among them -- has to follow it again.
  */
-export const BURNER = Address.parse('EQAGPJMxJ73OLpHUgQhI5YeQe2ZuAuUQ-4f_zfN4rV2Fl6Jp')
+export const BURNER = Address.parse('EQDcjZDWvotoVE0X4HSdt2pR3b2sBZ4XikzSVSdPiqdQMLRK')
 
 /** Hipo. The parent is also the hGRAM jetton master. */
 export const HIPO_TREASURY = Address.parse('EQCLyZHP4Xe8fpchQz76O-_RmUhaVc_9BAoGyJrwJrcbz2eZ')
