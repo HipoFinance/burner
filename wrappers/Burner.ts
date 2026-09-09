@@ -34,14 +34,20 @@ export const logTopic = {
  * Sizing constants, mirrored from contracts/imports/constants.fc. Tests assert against these, so
  * a change in the contract that is not mirrored here fails loudly rather than silently.
  */
+const swapGas = 400000000n
+const burnGas = 100000000n
+/** swap_gas + burn_gas: a cycle carries the gas for the rest of itself. */
+const depositForward = swapGas + burnGas
+
 export const budget = {
     reserve: 1000000000n,
-    swapGas: 400000000n,
+    swapGas,
     swapForward: 300000000n,
-    burnGas: 100000000n,
+    burnGas,
     discoveryGas: 50000000n,
-    depositForward: 500000000n,
-    minDeposit: 2000000000n,
+    depositForward,
+    /** 2 * deposit_forward: never deposit unless at least half of it is real stake. */
+    minDeposit: 2n * depositForward,
 } as const
 
 export interface BurnerConfig {

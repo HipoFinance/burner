@@ -12,23 +12,25 @@ import {
 import { Burner, emptyBurnerConfig } from '../wrappers/Burner'
 
 /**
- * The route the contract has hardcoded, checked against the chain before anything is sent. The
- * burner has no owner and no upgrade path, so a wrong constant here is not a misconfiguration
- * that can be corrected later -- it is a redeploy plus a treasury upgrade to name the new address.
+ * The route the contract has hardcoded, checked against the chain before anything is sent.
+ *
+ * A wrong constant is correctable now that the burner is upgradable, but correcting it still means
+ * a reviewed upgrade against a contract that has already been paid -- and if the address itself is
+ * wrong, a redeploy plus a treasury upgrade to name the new one. Cheaper to be right here.
  */
 export async function run(provider: NetworkProvider) {
     const ui = provider.ui()
 
     const code = await compile('Burner')
 
-    // The owner is the rescue hatch: it can move assets that fall out of the burn cycle, but it
-    // cannot redirect the burn or change the code. It is part of the state the address is derived
-    // from, so it has to be decided before deployment, not after.
+    // The owner is the rescue hatch, and since 2026-09-09 also the upgrade authority: it can move
+    // assets that fall out of the burn cycle, and it can install new code. It is part of the state
+    // the address is derived from, so it has to be decided before deployment, not after.
     const sender = provider.sender().address
-    ui.write('The owner can withdraw GRAM, hGRAM, HPO and anything else from this contract.')
-    ui.write('It cannot redirect the burn or change the code. Prefer a multisig.')
+    ui.write('The owner can withdraw GRAM, hGRAM, HPO and anything else from this contract, and')
+    ui.write('can replace its code with op::upgrade_code. Use a multisig.')
     ui.write('Ownership can be handed over later, or given up entirely with drop_ownership,')
-    ui.write('which makes the contract permanently immutable without a redeploy.')
+    ui.write('which freezes the code and closes the hatch together, without a redeploy.')
     ui.write('')
     const owner = await ui.inputAddress('Owner address', sender)
     ui.write(`Owner          : ${owner.toString()}`)
@@ -116,7 +118,8 @@ export async function run(provider: NetworkProvider) {
         return
     }
 
-    ui.write('The burn route is fixed in the code and cannot be changed after deployment.')
+    ui.write('The burn route is compiled in. Changing it later means a reviewed upgrade against a')
+    ui.write('contract that is already being paid, so get it right here.')
     ui.write(`The owner will be ${owner.toString()}.`)
     const confirm = await ui.choose('Deploy this burner?', ['no', 'yes'], (choice) => choice)
     if (confirm !== 'yes') {
@@ -125,10 +128,16 @@ export async function run(provider: NetworkProvider) {
     }
 
     // 2 GRAM covers the 1 GRAM reserve, the two discovery messages deployment sends on its own,
-    // and storage for a long time.
+    // and storage for a long time. It also leaves enough above the reserve that the first poke can
+    // stake -- budget::min_deposit is 1 GRAM -- which is how the route gets proven end to end
+    // before the treasury pays anything in.
     await burner.sendDeploy(provider.sender(), toNano('2'))
     await provider.waitForDeploy(burner.address)
 
     ui.write('Deployed. Deployment itself runs TEP-89 discovery against both masters, so the two')
     ui.write('wallets should already be known -- check with: npx blueprint run showBurner')
+    ui.write('')
+    ui.write('The deploy message only discovers; it does not stake. Send the burner a small amount')
+    ui.write('of GRAM to run one full cycle on the deployment balance and prove the route end to')
+    ui.write('end -- stake, swap, burn -- before setting the treasury\'s borrower_fee.')
 }

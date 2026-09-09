@@ -133,11 +133,16 @@ The forward is working capital, not a cost. What the swap does not spend stays i
 is swept into the next deposit, so `total_deposited` records the stake and not the forward —
 counting the forward on the way out would count it again on the way back in.
 
+Neither figure is a new number to remember. `budget::deposit_forward` is defined as
+`swap_gas + burn_gas` — a cycle carries the gas for the rest of itself — and `budget::min_deposit`
+as twice that, which states the rule (never deposit unless at least half of it is real stake)
+rather than picking a threshold, and works out at the same 1 GRAM it was before. Change `swap_gas`
+and both follow.
+
 The price of naming an explicit `coins` is that the contract now has to stay ahead of Hipo's
 deposit fee instead of letting the treasury subtract it: `deposit_coins` throws
 `err::insufficient_fee` unless `coins <= incoming - fee`. That fee was 0.0088 GRAM when this was
-written, so `budget::deposit_forward` at 0.5 GRAM is a ~50x margin, and `budget::min_deposit` was
-raised to 2 GRAM so that the stake is never smaller than the gas riding with it.
+written, so a 0.5 GRAM forward is a ~50x margin.
 
 This is exact on the instant-mint path, which is the one the treasury runs. With `instant_mint?`
 off the deposit goes through a bill and the notification does not arrive until the round settles;

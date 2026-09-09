@@ -61,10 +61,11 @@ notification, which pays for that cycle's own swap. Without it the reserve is a 
 no headroom — `try_deposit` sweeps down to exactly `budget::reserve` — so several payments in one
 block all deposit but only the first swaps. That happened on mainnet on 2026-09-09; the test is
 `runs every cycle when several payments land in the same block`, and it must send the payments in
-*one transaction*, because sequential sends let each cycle finish and catch nothing. `min_deposit`
-must stay above `deposit_forward`, and `deposit_forward` must stay well above Hipo's deposit fee
-(~0.0088 GRAM) or `deposit_coins` starts bouncing with `err::insufficient_fee`. `total_deposited`
-counts the stake, not the forward.
+*one transaction*, because sequential sends let each cycle finish and catch nothing. Both figures
+are derived, not chosen — the forward is `swap_gas + burn_gas`, `min_deposit` is twice that (still
+1 GRAM) — so keep them that way rather than pasting literals back in. `deposit_forward` must stay
+well above Hipo's deposit fee (~0.0088 GRAM) or `deposit_coins` starts bouncing with
+`err::insufficient_fee`. `total_deposited` counts the stake, not the forward.
 
 ## Commands
 

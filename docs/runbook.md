@@ -67,9 +67,15 @@ The order matters, and it is the reason to prefer this over the individual scrip
 4. **Take the GRAM**, only if abandoning this burner. Taking all of it leaves nothing for storage
    and the account will freeze; leaving it lets the burner resume if the route comes back.
 
-To redeploy against a live pool afterwards: update the route in
-`contracts/imports/constants.fc`, `npm run check`, `npx blueprint run deployBurner`, then a
-treasury upgrade to point `burner::addr` at the new contract.
+To point at a live pool afterwards, prefer an upgrade over a redeploy: update the route in
+`contracts/imports/constants.fc`, `npm run check`, `npx blueprint run upgradeBurner`. The address
+stays put, so nothing downstream has to follow it, and the dry run prints the route change as a
+diff line — check it says what you meant. No migration is needed: the route is compile-time, so
+the storage layout does not move.
+
+Only if ownership has been dropped is a redeploy the answer, because then no upgrade is possible:
+`npx blueprint run deployBurner`, then a treasury upgrade to point `burner::addr` at the new
+contract, and every downstream reference to the address has to be updated too.
 
 ## Doing it a step at a time
 

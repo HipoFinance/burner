@@ -65,7 +65,7 @@ export async function run(provider: NetworkProvider) {
         }
     }
 
-    // The health check that matters: an immutable contract pointed at a pool that moved on.
+    // The health check that matters: a burner pointed at a pool that moved on.
     try {
         const { stack } = await provider.provider(DEDUST_POOL).get('get_reserves', [])
         const reserveHgram = stack.readBigNumber()
@@ -81,9 +81,16 @@ export async function run(provider: NetworkProvider) {
         if (reserveHgram === 0n) {
             ui.write('')
             ui.write('WARNING: the pool this burner is hardcoded to has no liquidity left.')
-            ui.write('It cannot be repointed. Stop the flow at the source -- set the treasury\'s')
-            ui.write('borrower_fee to 0, which needs no upgrade -- then have the owner withdraw')
-            ui.write('whatever is left here, and redeploy against a live pool.')
+            ui.write('First, stop the flow at the source: set the treasury\'s borrower_fee to 0,')
+            ui.write('which needs no upgrade and takes effect immediately. Then recover what is')
+            ui.write('stuck here -- withdrawJetton, then resetPending -- so later payments stop')
+            ui.write('retrying a doomed leg.')
+            ui.write('')
+            ui.write('The pool is compiled in, so repointing it means an upgrade: change the')
+            ui.write('constant, then npx blueprint run upgradeBurner. The dry run prints the route')
+            ui.write('change as a diff line, so check it says what you meant. If ownership has')
+            ui.write('been dropped, no upgrade is possible and the answer is a new burner at a new')
+            ui.write('address plus a treasury upgrade to name it.')
         }
     } catch {
         ui.write('')

@@ -125,8 +125,8 @@ const int err::no_owner = 201;
 ;;
 ;; Note what it cannot do: it is a single pot, and try_deposit sweeps the balance down to exactly
 ;; this figure, so there is never headroom above it. That is why it can only ever fund one leg per
-;; burst of triggers, and why budget::deposit_forward rather than a larger reserve is the answer
-;; to concurrent payments.
+;; burst of triggers, and why raising it would not help -- try_swap compares against it either way.
+;; budget::deposit_forward is the answer to concurrent payments, not a bigger reserve.
 const int budget::reserve = 1000000000; ;; 1 GRAM
 
 ;; Attached to send_tokens for the swap leg. Hipo's wallet requires
@@ -145,7 +145,7 @@ const int budget::burn_gas = 100000000; ;; 0.1 GRAM
 const int budget::discovery_gas = 50000000; ;; 0.05 GRAM
 
 ;; Sent along with every deposit on top of what is actually staked, so that it rides back here as
-;; the value of the mint notification and pays for that cycle's own swap.
+;; the value of the mint notification and pays for the rest of that cycle.
 ;;
 ;; This is the whole reason try_deposit names an explicit `coins` instead of asking Hipo to stake
 ;; the maximum. The treasury reserves `coins` and forwards the rest (raw_reserve with
@@ -154,24 +154,28 @@ const int budget::discovery_gas = 50000000; ;; 0.05 GRAM
 ;; send::unreserved_balance. So the surplus arrives intact, minus about 0.002 GRAM of gas over the
 ;; three hops.
 ;;
-;; Sized at swap_gas plus a quarter of it as margin. It is working capital, not a cost: whatever
-;; the swap does not spend sits in the balance and is swept into the next deposit.
+;; It is exactly what the two remaining legs cost, rather than a number of its own: a cycle carries
+;; the gas for the rest of itself. Change swap_gas or burn_gas and this follows.
 ;;
-;; The one thing to keep true if this changes: it must stay comfortably above the treasury's own
-;; deposit fee, which is about 0.0088 GRAM. deposit_coins throws err::insufficient_fee unless
-;; `coins <= incoming - that fee`, and since we ask for `available - deposit_forward`, this is the
-;; margin. At 0.5 GRAM it is roughly 50x, so a gas-price rise cannot turn deposits into bounces.
-const int budget::deposit_forward = 500000000; ;; 0.5 GRAM
+;; It is working capital, not a cost. What the swap does not spend sits in the balance and is swept
+;; into the next deposit.
+;;
+;; The one thing to keep true: it must stay well above the treasury's own deposit fee, about 0.0088
+;; GRAM. deposit_coins throws err::insufficient_fee unless `coins <= incoming - that fee`, and since
+;; we ask for `available - deposit_forward`, this is the margin. At 0.5 GRAM it is roughly 50x, so a
+;; gas-price rise cannot turn deposits into bounces.
+const int budget::deposit_forward = budget::swap_gas + budget::burn_gas; ;; 0.5 GRAM
 
 ;; Smallest deposit worth making. There is deliberately no maximum: the whole balance above the
-;; reserve is deposited and burned every time. This floor is a dust guard, not a slippage
-;; control -- it exists so that returned change and stray small amounts cannot spend more in gas
-;; than they are worth.
+;; reserve is deposited and burned every time. This floor is a dust guard, not a slippage control --
+;; it exists so that returned change and stray small amounts cannot spend more in gas than they are
+;; worth.
 ;;
-;; It must exceed budget::deposit_forward, or try_deposit would compute a non-positive stake; the
-;; figure is that forward plus 1 GRAM of actual stake, which is itself a wide margin over the
-;; treasury's 0.0088 GRAM deposit fee.
-const int budget::min_deposit = 2000000000; ;; 2 GRAM
+;; Twice the forward, which says the rule rather than picking a figure: never deposit unless at
+;; least half of it is real stake. That also keeps the stake positive, which try_deposit relies on.
+;; It works out at the 1 GRAM this was before the forward existed, and stays a wide margin over the
+;; treasury's own 0.0088 GRAM deposit fee.
+const int budget::min_deposit = 2 * budget::deposit_forward; ;; 1 GRAM
 
 
 ;; ---------------------------------------------------------------------------------------------

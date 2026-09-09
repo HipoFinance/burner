@@ -225,8 +225,15 @@ describe('Burner', () => {
             expect((await f.hgramSupply()) - hgramBefore).toBe((deposited * stakeRate) / 1000000000n)
 
             // And it is a whole deposit_forward short of the balance the deposit swept.
+            //
+            // A range, not an equality: the sandbox charges storage rent on wall-clock time
+            // elapsed, so the balance at deposit time is a little under balanceBefore by an amount
+            // that depends on how busy the machine is. An exact assertion here passes alone and
+            // fails when the suites run in parallel. The tolerance is far below deposit_forward,
+            // so it still fails if the forward is dropped, doubled or miscomputed.
             const sweep = balanceBefore + BORROWER_FEE - budget.reserve
-            expect(deposited).toBe(sweep - budget.depositForward)
+            expect(deposited).toBeLessThanOrEqual(sweep - budget.depositForward)
+            expect(deposited).toBeGreaterThan(sweep - budget.depositForward - toNano('0.01'))
         })
 
         it('brings the swap gas home, so the balance is never left at the bare reserve', async () => {
